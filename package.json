@@ -1,0 +1,19 @@
+{
+  "name": "mysql-flask",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "dev": "npx postcss ./todo_list/static/css/tailwind.css -o ./todo_list/static/css/main.css --watch",
+    "build": "npx postcss ./todo_list/static/css/tailwind.css -o ./todo_list/static/css/main.css --env production"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "autoprefixer": "^10.4.21",
+    "postcss": "^8.5.6",
+    "postcss-cli": "^11.0.1",
+    "tailwindcss": "^3.4.18"
+  }
+}
