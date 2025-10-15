@@ -84,7 +84,8 @@ def sanitize_full_name(name):
 def store_token(token, user_id, db):
     decoded = decode_token(token)
     jti = decoded['jti']
-    expires = datetime.fromtimestamp(decoded['exp'])
+    # Ensure we store as timezone-aware datetime
+    expires = datetime.fromtimestamp(decoded['exp'], tz=datetime.timezone.utc)
     with db.cursor() as cur:
         cur.execute(
             "INSERT INTO access_tokens (jti, user_id, token, expires_at) VALUES (%s, %s, %s, %s)",
@@ -100,5 +101,8 @@ def is_token_valid(jti, db):
         result = cur.fetchone()
         if result:
             expires_at = result['expires_at']
-            return expires_at > datetime.datetime.now(datetime.timezone.utc)
+            # Ensure both are timezone-aware for proper comparison
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=datetime.timezone.utc)
+            return expires_at > datetime.now(datetime.timezone.utc)
         return False

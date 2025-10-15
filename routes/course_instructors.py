@@ -14,10 +14,10 @@ def get_course_instructors():
             search_term = request.args.get('search', '').strip()
             instance_filter = request.args.get('instance_id', '').strip()
             role_filter = request.args.get('role', '').strip().lower()
-            
+
             where_clauses = []
             params = []
-            
+
             if search_term:
                 where_clauses.append("(u.full_name LIKE %s OR cm.course_code LIKE %s OR cm.course_title LIKE %s)")
                 search_param = f"%{search_term}%"
@@ -28,14 +28,14 @@ def get_course_instructors():
             if role_filter:
                 where_clauses.append("ci_inst.role = %s")
                 params.append(role_filter)
-            
+
             where_clause = " AND ".join(where_clauses)
             if where_clause:
                 where_clause = "WHERE " + where_clause
-            
+
             # Use parameterized query instead of f-string for security
             query = """
-                SELECT 
+                SELECT
                     ci_inst.course_instructor_id,
                     ci_inst.instance_id,
                     ci_inst.user_id,
@@ -55,10 +55,10 @@ def get_course_instructors():
                 {where_clause}
                 ORDER BY cm.course_code, ci.term_code, ci_inst.role, u.full_name
             """.format(where_clause=where_clause)
-            
+
             cursor.execute(query, params)
             instructors = cursor.fetchall()
-            
+
             return jsonify({'success': True, 'instructors': instructors, 'total': len(instructors)}), 200
     except Exception as e:
         logger.error(f"Error fetching course instructors: {e}")
@@ -69,12 +69,12 @@ def get_course_instructors():
 def create_course_instructor_assignment():
     try:
         data = request.get_json()
-        
-        required_fields = ['instance_id', 'user_id']  # Fixed: removed trailing comma
+
+        required_fields = ['instance_id', 'user_id']
         for field in required_fields:
             if field not in data:
                 return jsonify({'success': False, 'message': f'Missing required field: {field}'}), 400
-        
+
         db = get_db()
         with db.cursor() as cursor:
             cursor.execute("""
@@ -82,8 +82,8 @@ def create_course_instructor_assignment():
             """, (data['user_id'],))
             user = cursor.fetchone()
             if not user or user['role'] != 'instructor':
-                return jsonify({'success': False, 'message': 'User must have instructor role'}), 400    
-            
+                return jsonify({'success': False, 'message': 'User must have instructor role'}), 400
+
             cursor.execute("""
                 SELECT course_instructor_id FROM course_instructors
                 WHERE instance_id = %s AND user_id = %s
@@ -91,20 +91,20 @@ def create_course_instructor_assignment():
             existing = cursor.fetchone()
             if existing:
                 return jsonify({'success': False, 'message': 'Instructor already assigned to this course instance'}), 400
-            
+
             cursor.execute("""
                 INSERT INTO course_instructors (instance_id, user_id, role)
                 VALUES (%s, %s, %s)
             """, (data['instance_id'], data['user_id'], user['role']))
             db.commit()
             return jsonify({
-                'success': True, 
+                'success': True,
                 'message': 'Instructor assigned successfully',
                 'course_instructor_id': cursor.lastrowid
             }), 201
     except Exception as e:
         logger.error(f"Error creating course instructor assignment: {e}")
-        db.rollback() 
+        db.rollback()
         return jsonify({"success": False, "error": str(e)}), 500
 
 @course_instructors_bp.route('/instructors/<int:course_instructor_id>', methods=['PUT'])
@@ -113,10 +113,10 @@ def update_course_instructor_assignment(course_instructor_id):
     try:
         data = request.get_json()
         role = data.get('role', '').strip().lower()
-        
+
         if 'role' not in data:
             return jsonify({'success': False, 'message': 'Missing required field: role'}), 400
-        
+
         db = get_db()
         with db.cursor() as cursor:
             cursor.execute("""
@@ -126,7 +126,7 @@ def update_course_instructor_assignment(course_instructor_id):
             existing = cursor.fetchone()
             if not existing:
                 return jsonify({'success': False, 'message': 'Course instructor assignment not found'}), 404
-            
+
             cursor.execute("""
                 UPDATE course_instructors
                 SET role = %s
@@ -136,7 +136,7 @@ def update_course_instructor_assignment(course_instructor_id):
             return jsonify({'success': True, 'message': 'Course instructor assignment updated successfully'}), 200
     except Exception as e:
         logger.error(f"Error updating course instructor assignment: {e}")
-        db.rollback()  
+        db.rollback()
         return jsonify({"success": False, "error": str(e)}), 500
 
 @course_instructors_bp.route('/instructors/<int:course_instructor_id>', methods=['DELETE'])
@@ -152,7 +152,7 @@ def delete_course_instructor_assignment(course_instructor_id):
             existing = cursor.fetchone()
             if not existing:
                 return jsonify({'success': False, 'message': 'Course instructor assignment not found'}), 404
-            
+
             cursor.execute("""
                 DELETE FROM course_instructors
                 WHERE course_instructor_id = %s
@@ -161,11 +161,11 @@ def delete_course_instructor_assignment(course_instructor_id):
             return jsonify({'success': True, 'message': 'Course instructor assignment deleted successfully'}), 200
     except Exception as e:
         logger.error(f"Error deleting course instructor assignment: {e}")
-        db.rollback()  
+        db.rollback()
         return jsonify({"success": False, "error": str(e)}), 500
-    
+
 @course_instructors_bp.route('/available-teachers', methods=['GET'])
-@jwt_required() 
+@jwt_required()
 def get_available_teachers():
     try:
         db = get_db()
@@ -181,7 +181,7 @@ def get_available_teachers():
     except Exception as e:
         logger.error(f"Error fetching available teachers: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
-    
+
 @course_instructors_bp.route('/available-instances', methods=['GET'])
 @jwt_required()
 def get_available_course_instances():

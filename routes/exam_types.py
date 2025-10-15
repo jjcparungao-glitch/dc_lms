@@ -13,7 +13,7 @@ def get_exam_types():
     page = int(request.args.get('page', 1))
     per_page = int(request.args.get('per_page', 50))
     sort_by = request.args.get('sort_by', 'exam_name')
-    sort_order = request.args.get('sort_order', 'asc')
+    sort_order = request.args.get('sort_order', 'asc').lower()
     offset = (page - 1) * per_page
 
     try:
@@ -21,11 +21,11 @@ def get_exam_types():
         with db.cursor() as cursor:
 
             valid_sort_columns = [
-                'exam_type_id', 'category', 'exam_name', 
+                'exam_type_id', 'category', 'exam_name',
                 'description', 'total_items', 'created_at', 'updated_at'
             ]
-            if sort_by not in valid_sort_columns:
-                sort_by = 'exam_name'
+            sort_column_map = {col: col for col in valid_sort_columns}
+            sort_column = sort_column_map.get(sort_by, 'exam_name')
 
             if sort_order.lower() not in ['asc', 'desc']:
                 sort_order = 'asc'
@@ -41,9 +41,9 @@ def get_exam_types():
             cursor.execute(count_query, params)
             total = cursor.fetchone()['total']
 
-  
+
             query = f"""
-                SELECT 
+                SELECT
                     exam_type_id,
                     exam_name,
                     category,
@@ -54,7 +54,7 @@ def get_exam_types():
                     updated_at
                 FROM exam_types
                 {where_clause}
-                ORDER BY {sort_by} {sort_order.upper()}
+                ORDER BY {sort_column} {sort_order.upper()}
                 LIMIT %s OFFSET %s
             """
 
@@ -85,14 +85,14 @@ def create_exam_type():
         exam_period = data.get('exam_period', '').strip()
         description = data.get('description', '').strip()
         total_items = data.get('total_items', 1)
-        
+
         if not exam_name:
             return jsonify({'success': False, 'message': 'Exam name is required'}), 400
         if category not in ['quiz', 'exam']:
             return jsonify({'success': False, 'message': 'Category must be either "quiz" or "exam"'}), 400
         if exam_period not in ['Prelim', 'Midterm', 'Pre-Final', 'Final']:
             return jsonify({'success': False, 'message': 'Invalid exam period'}), 400
-        
+
         total_items = int(total_items)
         if total_items < 1 or total_items > 100:
             return jsonify({'success': False, 'message': 'Total items must be between 1 and 100'}), 400
@@ -105,7 +105,7 @@ def create_exam_type():
                            ''', (exam_name, category, exam_period, description, total_items))
             db.commit()
             return jsonify({
-                'success': True, 
+                'success': True,
                 'message': 'Exam type created successfully',
                 'exam_type_id': cursor.lastrowid
             }), 201
@@ -114,7 +114,7 @@ def create_exam_type():
         return jsonify({'success': False, 'message': 'Database error occurred'}), 500
     except Exception as e:
         logger.error(f"Error creating exam type: {e}")
-        return jsonify({'success': False, 'message': str(e)}), 500
+        return jsonify({'success': False, 'message': 'Error creating exam type', 'error': str(e)}), 500
 
 @exam_types_bp.route('/<int:exam_type_id>', methods=['PUT'])
 @jwt_required()
@@ -126,14 +126,14 @@ def update_exam_type(exam_type_id):
         exam_period = data.get('exam_period', '').strip()
         description = data.get('description', '').strip()
         total_items = data.get('total_items', 1)
-        
+
         if not exam_name:
             return jsonify({'success': False, 'message': 'Exam name is required'}), 400
         if category not in ['quiz', 'exam']:
             return jsonify({'success': False, 'message': 'Category must be either "quiz" or "exam"'}), 400
         if exam_period not in ['Prelim', 'Midterm', 'Pre-Final', 'Final']:
             return jsonify({'success': False, 'message': 'Invalid exam period'}), 400
-        
+
         total_items = int(total_items)
         if total_items < 1 or total_items > 100:
             return jsonify({'success': False, 'message': 'Total items must be between 1 and 100'}), 400
@@ -158,7 +158,7 @@ def update_exam_type(exam_type_id):
         return jsonify({'success': False, 'message': 'Database error occurred'}), 500
     except Exception as e:
         logger.error(f"Error updating exam type: {e}")
-        return jsonify({'success': False, 'message': str(e)}), 500
+        return jsonify({'success': False, 'message': 'Error updating exam type', 'error': str(e)}), 500
 
 @exam_types_bp.route('/<int:exam_type_id>', methods=['DELETE'])
 @jwt_required()
@@ -179,4 +179,4 @@ def delete_exam_type(exam_type_id):
         return jsonify({'success': False, 'message': 'Database error occurred'}), 500
     except Exception as e:
         logger.error(f"Error deleting exam type: {e}")
-        return jsonify({'success': False, 'message': str(e)}), 500
+        return jsonify({'success': False, 'message': 'Error deleting exam type', 'error': str(e)}), 500

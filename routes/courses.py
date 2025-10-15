@@ -14,13 +14,14 @@ courses_bp = Blueprint('courses', __name__)
 model_id = "meta.llama3-70b-instruct-v1:0"
 
 def get_bedrock_client():
-    """"Initialize and return a boto3 Bedrock client."""
+    """Initialize and return a boto3 Bedrock client."""
     return boto3.client(
         'bedrock-runtime',
         region_name=os.getenv('AWS_REGION', 'us-west-2'),
         aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
         aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY')
     )
+
 def generate_with_bedrock(prompt, temperature=0.7):
     try:
         bedrock = get_bedrock_client()
@@ -28,7 +29,7 @@ def generate_with_bedrock(prompt, temperature=0.7):
             modelId=model_id,
             body=json.dumps({
                 "prompt": prompt,
-                "max_gen_len":4096,
+                "max_gen_len": 4096,
                 "temperature": temperature,
                 "top_p": 0.9,
             }),
@@ -49,30 +50,32 @@ def get_courses():
         search = request.args.get('search', '').strip()
         sort_by = request.args.get('sort_by', 'created_at')
         sort_order = request.args.get('sort_order', 'desc').lower()
-        
+
         offset = (page - 1) * per_page
-        
+
         db = get_db()
         with db.cursor() as cursor:
             where_conditions = []
-            params= []
-            if search: 
+            params = []
+            if search:
                 where_conditions.append("(course_code LIKE %s OR course_title LIKE %s)")
                 search_param = f"%{search}%"
                 params.extend([search_param, search_param])
-            
+
             where_clause = " WHERE " + " AND ".join(where_conditions) if where_conditions else ""
-            
-            count_query = f"SELECT COUNT(*) as total FROM courses {where_clause}"
+
+
+            count_query = f"SELECT COUNT(*) as total FROM courses_master {where_clause}"
             cursor.execute(count_query, params)
             total = cursor.fetchone()['total']
-            
+
             valid_sort_columns = ['course_code', 'course_title', 'created_at']
             if sort_by not in valid_sort_columns:
                 sort_by = 'created_at'
             if sort_order not in ['asc', 'desc']:
                 sort_order = 'desc'
-            
+
+
             query = f"""
                 SELECT course_id, course_code, course_title, description, created_at
                 FROM courses_master
@@ -83,7 +86,7 @@ def get_courses():
             params.extend([per_page, offset])
             cursor.execute(query, params)
             courses = cursor.fetchall()
-            
+
             return jsonify({
                 'success': True,
                 'courses': courses,
@@ -95,7 +98,7 @@ def get_courses():
     except Exception as e:
         logger.error(f"Error fetching courses: {e}")
         return jsonify({'success': False, 'message': str(e)}), 500
-    
+
 @courses_bp.route('/<int:course_id>', methods=['PUT'])
 @jwt_required()
 def update_course(course_id):
@@ -104,12 +107,12 @@ def update_course(course_id):
         course_code = data.get('course_code', '').strip()
         course_title = data.get('course_title', '').strip()
         description = data.get('description', '').strip()
-        
+
         print(f"Updating course {course_id} with code '{course_code}', title '{course_title}'")
-        
+
         if not course_code or not course_title:
             return jsonify({'success': False, 'message': 'Course code and title are required'}), 400
-        
+
         db = get_db()
         with db.cursor() as cursor:
             cursor.execute("""
@@ -121,20 +124,21 @@ def update_course(course_id):
 
             updates = []
             params = []
-            
+
             if course_code and course_code != existing_course['course_code']:
                 updates.append("course_code = %s")
                 params.append(course_code)
             if course_title and course_title != existing_course['course_title']:
                 updates.append("course_title = %s")
                 params.append(course_title)
-            if description is not None and description!= existing_course.get('description'):
+            if description is not None and description != existing_course.get('description'):
                 updates.append("description = %s")
                 params.append(description)
-            
+
             if not updates:
                 print("No changes detected.")
                 return jsonify({'success': True, 'message': 'No changes made'}), 200
+
             params.append(course_id)
             query = f"""
                 UPDATE courses_master
@@ -144,9 +148,10 @@ def update_course(course_id):
             cursor.execute(query, params)
             db.commit()
             return jsonify({'success': True, 'message': 'Course updated successfully'}), 200
-                
+
     except Exception as e:
         logger.error(f"Error updating course: {e}")
+        db.rollback()
         return jsonify({'success': False, 'message': str(e)}), 500
 
 @courses_bp.route('/<int:course_id>', methods=['DELETE'])
@@ -161,18 +166,16 @@ def delete_course(course_id):
             existing_course = cursor.fetchone()
             if not existing_course:
                 return jsonify({'success': False, 'message': 'Course not found'}), 404
-            
+
             cursor.execute("""
                 DELETE FROM courses_master WHERE course_id = %s
             """, (course_id,))
             db.commit()
-            
-            if cursor.rowcount == 0:
-                return jsonify({'success': False, 'message': 'Course not found or already deleted'}), 404
-            
+
             return jsonify({'success': True, 'message': 'Course deleted successfully'}), 200
     except Exception as e:
         logger.error(f"Error deleting course: {e}")
+        db.rollback()
         return jsonify({'success': False, 'message': str(e)}), 500
 
 @courses_bp.route('/upload-csv', methods=['POST'])
@@ -180,65 +183,60 @@ def delete_course(course_id):
 def upload_csv():
     try:
         if 'file' not in request.files:
-            return jsonify({'success': False, 'message': 'No file part'}), 400
+            return jsonify({'success': False, 'message': 'No file uploaded'}), 400
 
         file = request.files['file']
         if file.filename == '' or not file.filename.endswith('.csv'):
-            return jsonify({'success': False, 'message': 'No selected file or invalid file type'}), 400
-        
-        # Use more robust decoding
+            return jsonify({'success': False, 'message': 'Please select a valid CSV file'}), 400
+
         stream = io.StringIO(file.stream.read().decode("utf-8", errors="ignore"), newline=None)
         csv_input = csv.DictReader(stream)
 
         db = get_db()
         created_count = 0
         errors = []
-        
-        try:
-            with db.cursor() as cursor:
-                for row_num, row in enumerate(csv_input, start=2): 
-                    try:
-                        course_code = row.get('course_code', '').strip()
-                        course_title = row.get('course_title', '').strip()
-                        description = row.get('description', '').strip()
-                    
-                        if not course_code or not course_title:
-                            errors.append(f"Row {row_num}: Missing required fields.")
-                            continue
-                        
-                        cursor.execute("""
-                            INSERT INTO courses_master (course_code, course_title, description)
-                            VALUES (%s, %s, %s)
-                        """, (course_code, course_title, description))
-                        created_count += 1
-                        
-                    except Exception as e:
-                        logger.error(f"Error processing CSV row {row_num}: {e}")
-                        errors.append(f"Row {row_num}: {str(e)}")
+
+        with db.cursor() as cursor:
+            for row_num, row in enumerate(csv_input, start=2):
+                try:
+                    course_code = row.get('course_code', '').strip()
+                    course_title = row.get('course_title', '').strip()
+                    description = row.get('description', '').strip()
+
+                    if not course_code or not course_title:
+                        errors.append(f"Row {row_num}: Missing course_code or course_title")
                         continue
-                
-                db.commit()
-                
-            return jsonify({
-                'success': True, 
-                'created': created_count, 
-                'errors': errors,
-                'message': f'Successfully processed {created_count} courses'
-            }), 200
-            
-        except Exception as e:
-           
-            db.rollback()
-            logger.error(f"Database error during CSV upload: {e}")
-            return jsonify({
-                'success': False, 
-                'message': f'Database error: {str(e)}'
-            }), 500
+
+                    # Check for duplicates
+                    cursor.execute("SELECT course_id FROM courses_master WHERE course_code = %s", (course_code,))
+                    if cursor.fetchone():
+                        errors.append(f"Row {row_num}: Course code '{course_code}' already exists")
+                        continue
+
+                    cursor.execute(
+                        "INSERT INTO courses_master (course_code, course_title, description) VALUES (%s, %s, %s)",
+                        (course_code, course_title, description)
+                    )
+                    created_count += 1
+
+                except Exception as e:
+                    errors.append(f"Row {row_num}: {str(e)}")
+
+            db.commit()
+
+        return jsonify({
+            'success': True,
+            'message': f'CSV processed successfully. {created_count} courses created.',
+            'created': created_count,
+            'errors': errors,
+            'has_errors': len(errors) > 0
+        }), 200
 
     except Exception as e:
         logger.error(f"Error uploading CSV: {e}")
+        db.rollback()
         return jsonify({'success': False, 'message': str(e)}), 500
-    
+
 @courses_bp.route('/generate-description', methods=['POST'])
 @jwt_required()
 def generate_description():
@@ -246,10 +244,10 @@ def generate_description():
         data = request.get_json()
         course_code = data.get('course_code', '').strip()
         course_title = data.get('course_title', '').strip()
-        
+
         if not course_code or not course_title:
             return jsonify({'success': False, 'message': 'Course code and title are required'}), 400
-        
+
         # Strict prompt for course description only
         prompt = f"""Generate ONLY a course description for: {course_code} - {course_title}
 
@@ -266,25 +264,25 @@ Course: {course_code} - {course_title}
 Description:"""
 
         print(f"Generating description with prompt: {prompt}")
-        
+
         raw_description = generate_with_bedrock(prompt, temperature=0.7)
-        
+
         if raw_description:
             lines = raw_description.split('\n')
             description = ''
             for line in lines:
-                line - line.strip()
-                if line and not line.startswith(('Course:', 'Description:', '**', '#', '-','•')):
+                line = line.strip()
+                if line and not line.startswith(('Course:', 'Description:', '**', '#', '-', '•')):
                     if not description:
-                        description = line 
-                    elif len(description.split('.'))<4:
+                        description = line
+                    elif len(description.split('.')) < 4:
                         description += ' ' + line
                     else:
                         break
-            
-            description = description.replace('Description:','').strip()
+
+            description = description.replace('Description:', '').strip()
             print(f"Generated description: {description}")
-            
+
             return jsonify({
                 'success': True,
                 'description': description,
@@ -303,34 +301,37 @@ Description:"""
 @jwt_required()
 def export_csv():
     try:
-        db = get_db() 
+        db = get_db()
         with db.cursor() as cursor:
             cursor.execute("""
-                SELECT course_code, course_title, description 
-                FROM courses_master 
+                SELECT course_code, course_title, description
+                FROM courses_master
                 ORDER BY course_code
             """)
             courses = cursor.fetchall()
-            
+
             output = io.StringIO()
             writer = csv.writer(output)
-            
-            # Write header
-            writer.writerow(['course_code', 'course_title', 'description'])
-            
+
+            # Write UTF-8 BOM for Excel compatibility
+            output.write('\ufeff')
+
+            # Write header with better column names
+            writer.writerow(['Course Code', 'Course Title', 'Description'])
+
             # Write data
             for course in courses:
                 writer.writerow([
                     course['course_code'],
-                    course['course_title'], 
-                    course['description'] or ''  # Handle None values
+                    course['course_title'],
+                    course['description'] or ''
                 ])
-            
+
             response = make_response(output.getvalue())
-            response.headers['Content-Type'] = 'text/csv'
-            response.headers['Content-Disposition'] = 'attachment; filename=courses.csv'
+            response.headers['Content-Type'] = 'text/csv; charset=utf-8'
+            response.headers['Content-Disposition'] = 'attachment; filename="courses_export.csv"'
             return response
-            
+
     except Exception as e:
         logger.error(f"Error exporting CSV: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500

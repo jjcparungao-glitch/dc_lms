@@ -1,12 +1,14 @@
-from flask import Blueprint, request, jsonify, make_response
+from flask import Blueprint, request, jsonify, make_response, send_file
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from init_db import get_db
 from utils import logger
 import json
 
-from reportlab.lib.pagesizes import A4
+from reportlab.lib.pagesizes import letter, A4
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
+from reportlab.lib.colors import black, blue
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER
 from bs4 import BeautifulSoup
@@ -14,17 +16,20 @@ from bs4 import BeautifulSoup
 import requests
 import os
 import boto3
+import json
 import re
 import traceback
 import io
-from flask import send_file
 
 modules_bp = Blueprint('modules', __name__)
+
+# AWS Bedrock configuration
 model_id = "meta.llama3-70b-instruct-v1:0"
 
 def get_bedrock_client():
+    """Get AWS Bedrock client"""
     return boto3.client(
-        'bedrock-runtime',
+        "bedrock-runtime",
         region_name=os.getenv('AWS_REGION', 'us-west-2'),
         aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
         aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY')
@@ -38,12 +43,12 @@ def generate_with_bedrock(prompt, temperature=0.7):
         logger.info(f"Prompt: {prompt[:200]}")
         bedrock = get_bedrock_client()
         response = bedrock.invoke_model(
-            modelId =model_id,
-            body = json.dumps({
+            modelId=model_id,
+            body=json.dumps({
                 "prompt": prompt,
-                'max_gen_len':4096,
+                'max_gen_len': 4096,
                 'temperature': temperature,
-                'top_p':0.9
+                'top_p': 0.9
             })
         )
 
@@ -88,33 +93,35 @@ def call_ollama(prompt):
         return None
 
 def fix_code_blocks(content):
-    content = re.sub (r'<code>([^<]*\n[^<]*)</code>', r'<pre><code>\1</code></pre>', content, flags=re.DOTALL)
+    """Fix malformed code blocks in AI-generated content"""
+    # First, fix any existing malformed code tags
+    # Convert single-line <code> with newlines to <pre><code>
+    content = re.sub(r'<code>([^<]*\n[^<]*)</code>', r'<pre><code>\1</code></pre>', content, flags=re.DOTALL)
 
+    # Fix double pre tags
     content = re.sub(r'<pre><pre><code>', '<pre><code>', content)
     content = re.sub(r'</code></pre></pre>', '</code></pre>', content)
 
+    # Clean up excessive empty lines in existing pre/code blocks
     def clean_code_block(match):
         code_content = match.group(1)
+        # Remove excessive empty lines (more than 1 consecutive empty line)
         cleaned = re.sub(r'\n\s*\n\s*\n+', '\n\n', code_content)
-
-        cleaned =cleaned.strip()
+        # Remove leading/trailing whitespace from the entire block
+        cleaned = cleaned.strip()
         return f'<pre><code>{cleaned}</code></pre>'
 
-    content = re.sub (r'<pre><code>(.*?)</code></pre>', clean_code_block, content, flags=re.DOTALL)
+    content = re.sub(r'<pre><code>(.*?)</code></pre>', clean_code_block, content, flags=re.DOTALL)
 
     return content
-
 
 @modules_bp.route('/suggest-count', methods=['POST'])
 @jwt_required()
 def suggest_module_count():
     try:
         data = request.get_json()
-        course_title = data.get('course_title', '').strip()
-        course_description = data.get('course_description', '').strip()
-
-        if not course_title or not course_description:
-            return jsonify({'success': False, 'message': 'Missing required fields'}), 400
+        course_title = data.get('course_title', '')
+        course_description = data.get('course_description', '')
 
         prompt = f"""Based on this course information:
 Title: {course_title}
@@ -127,14 +134,29 @@ Suggest the optimal number of modules for this course. Consider the scope and co
         if suggested_count and suggested_count.isdigit():
             count = int(suggested_count)
             if 3 <= count <= 12:
-                return jsonify({'success': True, 'suggested_module_count': count}), 200
+                return jsonify({
+                    'success': True,
+                    'message': f'Suggested {count} modules for the course',
+                    'suggested_count': count
+                })
 
-            return jsonify({'suggested_count': 6, 'message': 'Suggested count out of range, defaulting to 6'}), 200
+        # Fallback to default
+        return jsonify({
+            'success': True,
+            'message': 'Using default module count',
+            'suggested_count': 6
+        })
+
     except Exception as e:
-        logger.error(f"Error suggesting module count: {str(e)}")
-        return jsonify({'success': False, 'message': 'Error suggesting module count'}), 500
+        print(f"Suggest module count error: {e}")
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'message': 'Error suggesting module count',
+            'error': str(e)
+        }), 500
 
-@modules_bp.route('/generate', methods = ['POST'])
+@modules_bp.route('/generate', methods=['POST'])
 @jwt_required()
 def generate_modules():
     try:
@@ -143,78 +165,77 @@ def generate_modules():
         course_title = data.get('course_title', '')
         course_description = data.get('course_description', '')
         module_count = data.get('module_count', 6)
-        override_existing = data.get('override_existing', False)
+        override_existing = data.get('override_existing', True)
         existing_modules = data.get('existing_modules', [])
 
         if not course_id:
-            return jsonify({'success': False, 'message': 'Missing course_id'}), 400
+            return jsonify({'error': 'Course ID required'}), 400
 
         db = get_db()
         with db.cursor() as cursor:
-            cursor.execute('''
-                            SELECT
-                            module_id,
-                            position,
-                            content_html
-                            FROM modules_master
-                            WHERE course_id = %s
-                            ORDER BY position
-                            ''', (course_id,))
-            current_modules = cursor.fetchall()
+                cursor.execute("""
+                    SELECT module_id, position, content_html
+                    FROM modules_master
+                    WHERE course_id = %s
+                    ORDER BY position
+                """, (course_id,))
+                current_modules = cursor.fetchall()
 
-            if override_existing:
+                if override_existing:
+                    # Clear existing modules
+                    cursor.execute("DELETE FROM modules_master WHERE course_id = %s", (course_id,))
+                    start_position = 1
+                    existing_titles_descriptions = []
+                else:
+                    # Keep existing modules, add new ones after
+                    start_position = len(current_modules) + 1
+                    existing_titles_descriptions = []
 
-                cursor.execute('DELETE FROM modules_master WHERE course_id = %s', (course_id,))
-                start_position = 1
-                existing_titles_descriptions = []
-            else:
-                start_position = len(current_modules) + 1
-                existing_titles_descriptions = []
+                    # Extract titles and descriptions from existing modules
+                    for module in current_modules:
+                        temp_div_content = module['content_html']
+                        # Simple regex to extract title and description
+                        title_match = re.search(r'<h2>(.*?)</h2>', temp_div_content)
+                        desc_match = re.search(r'<div class="module-description">\s*<p>(.*?)</p>', temp_div_content, re.DOTALL)
 
-                for module in current_modules:
-                    temp_div_content = module['content_html']
+                        if title_match and desc_match:
+                            existing_titles_descriptions.append({
+                                'title': title_match.group(1),
+                                'description': desc_match.group(1).strip()
+                            })
 
-                    title_match = re.search(r'<h2>(.*?)</h2>', temp_div_content)
-                    desc_match = re.search(r'<div class="module-description">\s*<p>(.*?)</p>', temp_div_content, re.DOTALL)
+                # Create prompt for new modules
+                if override_existing:
+                    # Override: Create fresh modules from scratch
+                    primary_prompt = f"""Create {module_count} course modules for:
+Course: {course_title}
+Description: {course_description}
 
-                    if title_match and desc_match:
-                        existing_titles_descriptions.append({
-                            'title': title_match.group(1),
-                            'description': desc_match.group(1)
-                        })
-            if override_existing:
+For each module, provide:
+1. A clear, descriptive title
+2. A comprehensive description (2-3 sentences)
 
-                primary_prompt = f'''
-                                    Create {module_count} course modules for:
-                                    Course: {course_title}
-                                    Description: {course_description}
+Format as JSON array:
+[{{"title": "Module Title", "description": "Module description..."}}]
 
-                                    For each module, provide:
-                                    1. A clear, descriptive title
-                                    2. A comprehensive description (2-3 sentences)
+Respond with ONLY the JSON array, no other text."""
 
-                                    Format as JSON array:
-                                    [{{"title": "Module Title", "description": "Module description..."}}]
-
-                                    Respond with ONLY the JSON array, no other text.
-                                 '''
-                fallback_prompt = f'''Create exactly {module_count} modules for: {course_title}
+                    fallback_prompt = f"""Create exactly {module_count} modules for: {course_title}
 
 Course Description: {course_description}
 
 You MUST return a valid JSON array with {module_count} objects. Each object must have "title" and "description" fields.
 
-Make the titles and descriptions specific to {course_title}. Return ONLY the JSON array.'''
+Make the titles and descriptions specific to {course_title}. Return ONLY the JSON array."""
+                else:
+                    # Add: Create modules that complement existing ones
+                    existing_info = ""
+                    if existing_titles_descriptions:
+                        existing_info = "\n\nExisting modules to avoid overlap:\n"
+                        for i, mod in enumerate(existing_titles_descriptions, 1):
+                            existing_info += f"{i}. {mod['title']}: {mod['description']}\n"
 
-            else:
-                existing_info=''
-                if existing_titles_descriptions:
-                    existing_info = '\n\nExisting modules to avoid overlap:\n'
-                    for i, mod in enumerate(existing_titles_descriptions, start=1):
-                        existing_info += f"{i}. {mod['title']}: {mod['description']}\n"
-
-                primary_prompt = f'''
-                Create {module_count} NEW course modules for:
+                    primary_prompt = f"""Create {module_count} NEW course modules for:
 Course: {course_title}
 Description: {course_description}{existing_info}
 
@@ -227,10 +248,9 @@ Requirements:
 Format as JSON array:
 [{{"title": "Module Title", "description": "Module description..."}}]
 
-Respond with ONLY the JSON array, no other text.
-                '''
-                fallback_prompt = f'''
-                reate exactly {module_count} modules for: {course_title}
+Respond with ONLY the JSON array, no other text."""
+
+                    fallback_prompt = f"""Create exactly {module_count} modules for: {course_title}
 
 Course Description: {course_description}
 
@@ -238,92 +258,90 @@ You MUST return a valid JSON array with {module_count} objects. Each object must
 
 Make the titles and descriptions specific to {course_title} and avoid these existing topics: {', '.join([mod['title'] for mod in existing_titles_descriptions])}.
 
-Return ONLY the JSON array.
-                '''
+Return ONLY the JSON array."""
 
-            ai_response = generate_with_bedrock(primary_prompt)
-            modules_data = None
+                # Try primary prompt first
+                ai_response = generate_with_bedrock(primary_prompt)
+                modules_data = None
 
-            if ai_response:
-                try:
-                    modules_data = json.loads(ai_response)
-                    if not isinstance(modules_data, list) or len(modules_data) != module_count:
-                        raise ValueError("Invalid module data structure or count mismatch")
-                except (json.JSONDecodeError, ValueError) as e:
-                    logger.warning(f"Primary prompt parsing failed: {str(e)}. Trying fallback prompt...")
-                    ai_response = generate_with_bedrock(fallback_prompt)
-                    if ai_response:
-                        try:
-                            modules_data = json.loads(ai_response)
-                            if not isinstance(modules_data, list) or len(modules_data) != module_count:
-                                raise ValueError("Fallback prompt: Invalid module data structure or count mismatch")
-                        except (json.JSONDecodeError, ValueError) as e:
-                            modules_data = None
-                            logger.error(f"Fallback prompt parsing failed: {str(e)}")
-            if not modules_data:
-                modules_data = []
-                for i in range(module_count):
-                    if override_existing:
-                        modules_data.append({
-                            'title': f'Module {i+1}:{course_title} - Part {i+1}',
-                            "description": f"This module covers important concepts and topics related to {course_title}. Students will learn key principles and practical applications."
-                        })
-                    else:
-                        modules_data.append({
+                if ai_response:
+                    try:
+                        modules_data = json.loads(ai_response)
+                        if not isinstance(modules_data, list) or len(modules_data) != module_count:
+                            raise ValueError("Invalid response format")
+                    except (json.JSONDecodeError, ValueError):
+                        # Try fallback prompt
+                        ai_response = generate_with_bedrock(fallback_prompt)
+                        if ai_response:
+                            try:
+                                modules_data = json.loads(ai_response)
+                                if not isinstance(modules_data, list) or len(modules_data) != module_count:
+                                    raise ValueError("Fallback also failed")
+                            except (json.JSONDecodeError, ValueError):
+                                modules_data = None
+
+                # If both prompts fail, create default modules
+                if not modules_data:
+                    modules_data = []
+                    for i in range(module_count):
+                        if override_existing:
+                            # Fresh modules starting from 1
+                            modules_data.append({
+                                "title": f"Module {i+1}: {course_title} - Part {i+1}",
+                                "description": f"This module covers important concepts and topics related to {course_title}. Students will learn key principles and practical applications."
+                            })
+                        else:
+                            # Additional modules continuing from existing
+                            modules_data.append({
                                 "title": f"Module {start_position + i}: {course_title} - Advanced Topics {i+1}",
                                 "description": f"This module covers advanced concepts and topics related to {course_title}. Students will explore specialized principles and practical applications."
                             })
 
-                for i , module in enumerate(modules_data):
+                # Insert new modules
+                for i, module in enumerate(modules_data):
                     title = module.get('title', f'Module {start_position + i}')
-                    description = module.get('description','')
+                    description = module.get('description', '')
 
-                    content_html = f'''
-                    <div class="module-content">
-                    <h2>{title}</h2>
-                    <div class="module-description">
-                    <p>{description}</p>
-                    </div>
-                    <div class="module-body">
-                    <p>Module content will be added here...</p>
-                    </div>
-                    </div>
-                    '''
-                    cursor.execute('''
-                                   INSERT INTO modules_master (course_id, position, content_html)
+                    # Create basic HTML content
+                    content_html = f"""<div class="module-content">
+<h2>{title}</h2>
+<div class="module-description">
+<p>{description}</p>
+</div>
+<div class="module-body">
+<p>Module content will be added here...</p>
+</div>
+</div>"""
+
+                    cursor.execute("""
+                        INSERT INTO modules_master (course_id, position, content_html)
                         VALUES (%s, %s, %s)
-                    ''', (course_id, start_position + i, content_html))
+                    """, (course_id, start_position + i, content_html))
 
-                db.commit()
-
-                cursor.execute('''
-                                   SELECT
-                                   module_id,
-                                   position,
-                                   content_html,
-                                   created_at,
-                                   updated_at
-                                   FROM modules_master
-                                   WHERE course_id = %s
-                                   ORDER BY position
-                                   ''', (course_id,))
+                # Return all modules (existing + new)
+                cursor.execute("""
+                    SELECT module_id, position, content_html, created_at, updated_at
+                    FROM modules_master
+                    WHERE course_id = %s
+                    ORDER BY position
+                """, (course_id,))
                 all_modules = cursor.fetchall()
 
-                action = "overriden with" if override_existing else "added"
+                action = "overridden with" if override_existing else "added"
                 return jsonify({
-                        'success': True,
-                        'message': f'Successfully {action} {len(modules_data)} new modules',
-                        'modules': all_modules
-                    })
+                    'success': True,
+                    'message': f'Successfully {action} {len(modules_data)} new modules',
+                    'modules': all_modules
+                })
+
     except Exception as e:
-        logger.error(f"Error occurred while processing modules: {str(e)}")
         return jsonify({
             'success': False,
-            'message': 'An error occurred while processing modules.',
+            'message': 'Error generating modules',
             'error': str(e)
-        })
+        }), 500
 
-@modules_bp.route('/courses', methods = ['GET'])
+@modules_bp.route('/courses', methods=['GET'])
 @jwt_required()
 def get_courses():
     try:
@@ -331,107 +349,165 @@ def get_courses():
 
         db = get_db()
         with db.cursor() as cursor:
-            where_clause = ''
+            where_clause = ""
             params = []
 
             if search:
-                where_clause= 'WHERE course_code LIKE  %s OR course_title LIKE %s'
-                params = [f'%{search}%', f'%{search}%']
-            query = f'''
-                    SELECT course_id, course_code, course_title
-                    FROM courses_master
-                    {where_clause}
-                    ORDER BY course_code
-                    '''
+                where_clause = "WHERE course_code LIKE %s OR course_title LIKE %s"
+                params = [f"%{search}%", f"%{search}%"]
+
+            query = f"""
+                SELECT course_id, course_code, course_title
+                FROM courses_master
+                {where_clause}
+                ORDER BY course_code
+            """
 
             cursor.execute(query, params)
             courses = cursor.fetchall()
-            return jsonify({'success': True, 'courses': courses}), 200
+            return jsonify({
+                'success': True,
+                'message': f'Found {len(courses)} courses',
+                'courses': courses
+            })
     except Exception as e:
-        logger.error(f"Error fetching courses: {str(e)}")
-        return jsonify({'success': False, 'message': 'Error fetching courses', 'error': str(e)}), 500
+        return jsonify({
+            'success': False,
+            'message': 'Error retrieving courses',
+            'error': str(e)
+        }), 500
 
-@modules_bp.route('/course-details/<int:course_id>', methods = ['GET'])
+@modules_bp.route('/course-details/<int:course_id>', methods=['GET'])
 @jwt_required()
 def get_course_details(course_id):
     try:
         db = get_db()
         with db.cursor() as cursor:
-            cursor.execute('''
-                        SELECT
-                        course_id,
-                        course_code,
-                        course_title,
-                        description
-                        FROM courses_master
-                        WHERE course_id = %s
-                        ''', (course_id,))
+            cursor.execute("""
+                SELECT course_id, course_code, course_title, description
+                FROM courses_master
+                WHERE course_id = %s
+            """, (course_id,))
             course = cursor.fetchone()
 
             if not course:
-                logger.warning(f"Course with ID {course_id} not found.")
-                return jsonify({'success': False, 'message': 'Course not found'}), 404
+                return jsonify({
+                    'success': False,
+                    'message': 'Course not found',
+                    'error': 'Course not found'
+                }), 404
 
-            return jsonify({'success': True, 'course': course}), 200
+            return jsonify({
+                'success': True,
+                'message': 'Course details retrieved successfully',
+                'course': course
+            })
     except Exception as e:
-        logger.error(f"Error fetching course details: {str(e)}")
-        return jsonify({'success': False, 'message': 'Error fetching course details', 'error': str(e)}), 500
+        return jsonify({
+            'success': False,
+            'message': 'Error retrieving course details',
+            'error': str(e)
+        }), 500
 
-@modules_bp.route('/save-description', methods = ['POST'])
+@modules_bp.route('/save-description', methods=['POST'])
 @jwt_required()
 def save_description():
     try:
         data = request.get_json()
         course_id = data.get('course_id')
-        description = data.get('description', '')
+        description = data.get('description')
 
         if not course_id:
-            return jsonify({'success': False, 'message': 'Missing course_id'}), 400
+            return jsonify({'error': 'Course ID required'}), 400
+
         db = get_db()
         with db.cursor() as cursor:
-            cursor.execute('SELECT course_id, description FROM courses_master WHERE course_id = %s', (course_id,))
+            # First check if course exists
+            cursor.execute("SELECT course_id, description FROM courses_master WHERE course_id = %s", (course_id,))
             course = cursor.fetchone()
 
             if not course:
-                return jsonify({'success': False, 'message': 'Course not found'}), 404
+                return jsonify({
+                    'success': False,
+                    'message': 'Course not found',
+                    'error': 'Course not found'
+                }), 404
 
+            # Only update if description is provided and different
             if description and description.strip():
-                cursor.execute('''
-                               UPDATE courses_master SET description = %s WHERE course_id = %s
-                               ''', (description, course_id))
-                db.commit()
-            return jsonify({'success': True, 'message': 'Course description updated successfully'}), 200
+                cursor.execute(
+                    "UPDATE courses_master SET description = %s WHERE course_id = %s",
+                    (description, course_id)
+                )
+
+            return jsonify({
+                'success': True,
+                'message': 'Description saved successfully'
+            })
     except Exception as e:
-        logger.error(f"Error saving course description: {str(e)}")
-        return jsonify({'success': False, 'message': 'Error saving course description', 'error': str(e)}), 500
+        return jsonify({
+            'success': False,
+            'message': 'Error saving description',
+            'error': str(e)
+        }), 500
 
 @modules_bp.route('/', methods=['GET'])
 @jwt_required()
 def get_modules():
     try:
         course_id = request.args.get('course_id')
+
         if not course_id:
-            return jsonify({'success': False, 'message': 'course_id is required'}), 400
+            return jsonify({
+                'success': False,
+                'message': 'Course ID required',
+                'error': 'Course ID required'
+            }), 400
+
         db = get_db()
         with db.cursor() as cursor:
-            cursor.execute(
-                'SELECT course_code, course_title, description FROM courses_master WHERE course_id = %s', (course_id,)
-                )
+            # Get course info
+            cursor.execute("SELECT course_code, course_title, description FROM courses_master WHERE course_id = %s", (course_id,))
+            course = cursor.fetchone()
+
+            if not course:
+                return jsonify({
+                    'success': False,
+                    'message': 'Course not found',
+                    'error': 'Course not found'
+                }), 404
+
+            # Get modules for this course
+            cursor.execute("""
+                SELECT module_id, position, content_html, learning_outcomes, created_at, updated_at
+                FROM modules_master
+                WHERE course_id = %s
+                ORDER BY position
+            """, (course_id,))
             modules = cursor.fetchall()
 
+            # Get sections for each module
             for module in modules:
-                cursor.execute ('''
-                                SELECT section_id, position, title, content
-                                FROM module_sections
-                                WHERE module_id = %s
-                                ORDER BY position
-                                ''', (module['module_id'],))
+                cursor.execute("""
+                    SELECT section_id, position, title, content
+                    FROM module_sections
+                    WHERE module_id = %s
+                    ORDER BY position
+                """, (module['module_id'],))
                 module['sections'] = cursor.fetchall()
 
-            return jsonify({'success': True, 'modules': modules}), 200
+            return jsonify({
+                'success': True,
+                'message': f'Retrieved {len(modules)} modules for course',
+                'course': course,
+                'modules': modules
+            })
     except Exception as e:
-        logger.error(f"Error fetching modules: {str(e)}")
-        return jsonify({'success': False, 'message':'Error fetching modules', 'error':str(e)}), 500
+        return jsonify({
+            'success': False,
+            'message': 'Error retrieving modules',
+            'error': str(e)
+        }), 500
 
 @modules_bp.route('/update', methods=['POST'])
 @jwt_required()
@@ -443,21 +519,34 @@ def update_module():
         description = data.get('description')
 
         if not module_id:
-            return jsonify({'success': False, 'message': 'module_id is required'}), 400
+            return jsonify({
+                'success': False,
+                'message': 'Module ID required',
+                'error': 'Module ID required'
+            }), 400
 
         db = get_db()
         with db.cursor() as cursor:
-            cursor.execute ('SELECT content_html FROM modules_master WHERE module_id = %s', (module_id,))
+            # Get current module
+            cursor.execute("SELECT content_html FROM modules_master WHERE module_id = %s", (module_id,))
             module = cursor.fetchone()
 
             if not module:
-                return jsonify({'success': False, 'message': 'Module not found'}), 404
+                return jsonify({
+                    'success': False,
+                    'message': 'Module not found',
+                    'error': 'Module not found'
+                }), 404
 
+            # Parse current HTML and update
             current_html = module['content_html']
 
             if title:
+                # Update title in HTML
                 current_html = re.sub(r'<h2>.*?</h2>', f'<h2>{title}</h2>', current_html)
+
             if description:
+                # Update description in HTML - handle both simple and complex content
                 if '<div class="module-description">' in current_html:
                     # Replace existing description
                     current_html = re.sub(
@@ -473,14 +562,22 @@ def update_module():
                         r'\1\n<div class="module-description"><p>' + description + '</p></div>',
                         current_html
                     )
-            cursor.execute('''
-                           UPDATE modules_master SET content_html = %s WHERE module_id = %s
-                           ''', (current_html, module_id))
-            db.commit()
-            return jsonify({'success': True, 'message': 'Module updated successfully'}), 200
+
+            cursor.execute(
+                "UPDATE modules_master SET content_html = %s WHERE module_id = %s",
+                (current_html, module_id)
+            )
+
+            return jsonify({
+                'success': True,
+                'message': 'Module updated successfully'
+            })
     except Exception as e:
-        logger.error(f"Error updating module: {str(e)}")
-        return jsonify({'success': False, 'message': 'Error updating module', 'error': str(e)}), 500
+        return jsonify({
+            'success': False,
+            'message': 'Error updating module',
+            'error': str(e)
+        }), 500
 
 @modules_bp.route('/regenerate', methods=['POST'])
 @jwt_required()
@@ -494,12 +591,12 @@ def regenerate_module():
         existing_modules = data.get('existing_modules', [])
 
         if not module_id:
-            return jsonify({'success': False, 'message': 'module_id is required'}), 400
+            return jsonify({'error': 'Module ID required'}), 400
 
+        # Create prompt to regenerate specific module
         existing_list = ', '.join(existing_modules) if existing_modules else 'None'
 
-        prompt = f'''
-        Generate ONLY a module description for: "{module_title}"
+        prompt = f"""Generate ONLY a module description for: "{module_title}"
 
 Course: {course_title}
 Course Description: {course_description}
@@ -512,25 +609,31 @@ Requirements:
 - Do not include the module title in your response
 - Return ONLY the description text, no formatting, no JSON, no extra text
 
-Description:
-        '''
+Description:"""
 
         description = generate_with_bedrock(prompt)
 
         if description:
+            # Clean up the response to ensure it's just the description
             description = description.strip()
-
+            # Remove any potential title or formatting
             lines = description.split('\n')
+            # Take only the meaningful content lines
             clean_lines = [line.strip() for line in lines if line.strip() and not line.strip().startswith(module_title)]
-        if clean_lines:
-            description = ' '.join(clean_lines)
-        if not description or len(description.strip()) <10:
-            description = f'This module covers important concepts related to {module_title} within the context of {course_title}. Students will explore key principles and practical applications specific to this topic.'
+            if clean_lines:
+                description = ' '.join(clean_lines)
 
-        return jsonify({'success': True, 'description': description}), 200
+        if not description or len(description.strip()) < 10:
+            description = f"This module covers important concepts related to {module_title} within the context of {course_title}. Students will explore key principles and practical applications specific to this topic."
+
+        return jsonify({'description': description.strip()})
+
     except Exception as e:
-        logger.error(f"Error regenerating module description: {str(e)}")
-        return jsonify({'success': False, 'message': 'Error regenerating module description', 'error': str(e)}), 500
+        return jsonify({
+            'success': False,
+            'message': 'Error saving description',
+            'error': str(e)
+        }), 500
 
 @modules_bp.route('/delete/<int:module_id>', methods=['DELETE'])
 @jwt_required()
@@ -538,15 +641,25 @@ def delete_module(module_id):
     try:
         db = get_db()
         with db.cursor() as cursor:
-            cursor.execute (' DELETE FROM modules_master WHERE module_id = %s', (module_id,))
-            db.commit()
+            cursor.execute("DELETE FROM modules_master WHERE module_id = %s", (module_id,))
 
             if cursor.rowcount == 0:
-                return jsonify({'success': False, 'message': 'Module not found'}), 404
-            return jsonify({'success': True, 'message': 'Module deleted successfully'}), 200
+                return jsonify({
+                    'success': False,
+                    'message': 'Module not found',
+                    'error': 'Module not found'
+                }), 404
+
+            return jsonify({
+                'success': True,
+                'message': 'Module deleted successfully'
+            })
     except Exception as e:
-        logger.error(f"Error deleting module: {str(e)}")
-        return jsonify({'success': False, 'message': 'Error deleting module', 'error': str(e)}), 500
+        return jsonify({
+            'success': False,
+            'message': 'Error deleting module',
+            'error': str(e)
+        }), 500
 
 @modules_bp.route('/reorder', methods=['POST'])
 @jwt_required()
@@ -554,77 +667,103 @@ def reorder_module():
     try:
         data = request.get_json()
         module_id = data.get('module_id')
-        direction = data.get('direction')
+        direction = data.get('direction')  # 'up' or 'down'
 
-        print (f"Reorder request - module_id: {module_id}, direction: {direction}")
-        logger.info(f"Reorder request - module_id: {module_id}, direction: {direction}")
+        print(f"Reorder request: module_id={module_id}, direction={direction}")
+
+        if not module_id or direction not in ['up', 'down']:
+            return jsonify({
+                'success': False,
+                'message': 'Module ID and valid direction required',
+                'error': 'Module ID and valid direction required'
+            }), 400
 
         db = get_db()
         with db.cursor() as cursor:
-            cursor.execute('''
-                           SELECT
-                           position,
-                           course_id
-                           FROM modules_master
-                           WHERE module_id = %s
-                           ''', (module_id,))
+            # Get current module position and course_id
+            cursor.execute("""
+                SELECT position, course_id FROM modules_master
+                WHERE module_id = %s
+            """, (module_id,))
             current_module = cursor.fetchone()
+
+            print(f"Current module: {current_module}")
+
             if not current_module:
-                return jsonify({'success': False, 'message': 'Module not found'}), 404
+                return jsonify({
+                    'success': False,
+                    'message': 'Module not found',
+                    'error': 'Module not found'
+                }), 404
+
             current_position = current_module['position']
             course_id = current_module['course_id']
 
+            # Determine target position
             if direction == 'up':
                 target_position = current_position - 1
-            else:
+            else:  # down
                 target_position = current_position + 1
 
-            print(f"Current position: {current_position}, Target position: {target_position}")
-            logger.info(f"Current position: {current_position}, Target position: {target_position}")
-            #check if target position exists
-            cursor.execute ('''
-                            SELECT module_id FROM modules_master
-                            WHERE course_id = %s AND position = %s
-                            ''', (course_id, target_position))
+            print(f"Target position: {target_position}")
+
+            # Check if target position exists
+            cursor.execute("""
+                SELECT module_id FROM modules_master
+                WHERE course_id = %s AND position = %s
+            """, (course_id, target_position))
             target_module = cursor.fetchone()
 
             print(f"Target module: {target_module}")
-            logger.info(f"Target module: {target_module}")
 
             if not target_module:
-                return jsonify({'success': False, 'message': 'Cannot move module further in this direction'}), 400
+                return jsonify({
+                    'success': False,
+                    'message': 'Cannot move module in that direction',
+                    'error': 'Cannot move module in that direction'
+                }), 400
 
             target_module_id = target_module['module_id']
 
+            # Use temporary position to avoid unique constraint violation
             temp_position = 9999
 
-            #move current to temp
-            cursor.execute('''
-                           UPDATE modules_master
-                           SET position = %s
-                           WHERE module_id = %s
-                           ''', (temp_position, module_id))
-            #move target to current
-            cursor.execute('''
-                           UPDATE modules_master
-                           SET position = %s
-                           WHERE module_id = %s
-                           ''', (current_position, target_module_id))
-            #move current (temp) to target
-            cursor.execute('''
-                           UPDATE modules_master
-                           SET position = %s
-                           WHERE module_id = %s
-                           ''', (target_position, module_id))
-            db.commit()
-            print(f"Module {module_id} moved {direction} successfully.")
-            logger.info(f"Module {module_id} moved {direction} successfully.")
-            return jsonify({'success': True, 'message': f'Module moved {direction} successfully'}), 200
-    except Exception as e:
-        logger.error(f"Error reordering module: {str(e)}")
-        return jsonify({'success': False, 'message': 'Error reordering module', 'error': str(e)}), 500
+            # Step 1: Move current module to temp position
+            cursor.execute("""
+                UPDATE modules_master
+                SET position = %s
+                WHERE module_id = %s
+            """, (temp_position, module_id))
 
-@modules_bp.route ('/generate-outcomes', methods=['POST'])
+            # Step 2: Move target module to current position
+            cursor.execute("""
+                UPDATE modules_master
+                SET position = %s
+                WHERE module_id = %s
+            """, (current_position, target_module_id))
+
+            # Step 3: Move current module to target position
+            cursor.execute("""
+                UPDATE modules_master
+                SET position = %s
+                WHERE module_id = %s
+            """, (target_position, module_id))
+
+            print("Position swap completed successfully")
+            return jsonify({
+                'success': True,
+                'message': 'Module position updated successfully'
+            })
+    except Exception as e:
+        print(f"Reorder error: {e}")
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'message': 'Error reordering module',
+            'error': str(e)
+        }), 500
+
+@modules_bp.route('/generate-outcomes', methods=['POST'])
 @jwt_required()
 def generate_learning_outcomes():
     try:
@@ -634,178 +773,189 @@ def generate_learning_outcomes():
         specific_module_id = data.get('module_id')
 
         if not course_id:
-            return jsonify({'success': False, 'message': 'course_id is required'}), 400
+            return jsonify({
+                'success': False,
+                'message': 'Course ID required',
+                'error': 'Course ID required'
+            }), 400
 
         db = get_db()
         with db.cursor() as cursor:
-
-            cursor.execute('SELECT course_title, description FROM courses_master WHERE course_id = %s', (course_id,))
+            # Get course info
+            cursor.execute("SELECT course_title, description FROM courses_master WHERE course_id = %s", (course_id,))
             course = cursor.fetchone()
 
             if not course:
-                return jsonify({'success': False, 'message': 'Course not found'}), 404
+                return jsonify({
+                    'success': False,
+                    'message': 'Course not found',
+                    'error': 'Course not found'
+                }), 404
 
+            # Get modules based on the request type
             if specific_module_id:
-                cursor.execute('''
-                               SELECT
-                               module_id,
-                               position,
-                               content_html
-                               FROM modules_master
-                               WHERE course_id = %s AND module_id = %s
-                               ORDER BY position
-                               ''', (course_id, specific_module_id))
+                # Generate for specific module only
+                cursor.execute("""
+                    SELECT module_id, position, content_html
+                    FROM modules_master
+                    WHERE course_id = %s AND module_id = %s
+                """, (course_id, specific_module_id))
                 modules = cursor.fetchall()
             elif only_empty:
-                cursor.execute('''
-                               SELECT
-                               module_id,
-                               position,
-                               content_html
-                               FROM modules_master
-                               WHERE course_id = %s AND(learning_outcomes IS NULL OR learning_outcomes = 'null' OR learning_outcomes = '')
-                               ORDER BY position
-                               ''', (course_id,))
+                # Generate only for modules without learning outcomes
+                cursor.execute("""
+                    SELECT module_id, position, content_html
+                    FROM modules_master
+                    WHERE course_id = %s AND (learning_outcomes IS NULL OR learning_outcomes = 'null' OR learning_outcomes = '[]')
+                    ORDER BY position
+                """, (course_id,))
                 modules = cursor.fetchall()
             else:
-                cursor.execute('''
-                               SELECT
-                               module_id,
-                               position,
-                               content_html
-                               FROM modules_master
-                               WHERE course_id = %s
-                               ORDER BY position
-                               ''', (course_id,))
+                # Generate for all modules
+                cursor.execute("""
+                    SELECT module_id, position, content_html
+                    FROM modules_master
+                    WHERE course_id = %s
+                    ORDER BY position
+                """, (course_id,))
                 modules = cursor.fetchall()
 
             if not modules:
                 if specific_module_id:
-                    return jsonify({'success': False, 'message': 'Module not found'}), 404
+                    return jsonify({
+                        'success': False,
+                        'message': 'Module not found',
+                        'error': 'Module not found'
+                    }), 404
                 elif only_empty:
-                    return jsonify({'success': False, 'message': 'No modules with empty learning outcomes found'}), 404
+                    return jsonify({
+                        'success': True,
+                        'message': 'All modules already have learning outcomes'
+                    }), 200
                 else:
-                    return jsonify({'success': False, 'message': 'No modules found for this course'}), 404
+                    return jsonify({
+                        'success': False,
+                        'message': 'No modules found for this course',
+                        'error': 'No modules found for this course'
+                    }), 404
 
-            cursor.execute('''
-                           SELECT
-                               module_id,
-                               position,
-                               content_html
-                           FROM modules_master
-                           WHERE course_id = %s
-                           ORDER BY position
-                           ''', (course_id,))
+            # Get all modules for context (to avoid overlap)
+            cursor.execute("""
+                SELECT module_id, position, content_html
+                FROM modules_master
+                WHERE course_id = %s
+                ORDER BY position
+            """, (course_id,))
             all_modules = cursor.fetchall()
 
+            # Generate learning outcomes for selected modules
             for module in modules:
-                #extract module title and description from content_html
+                # Extract module title and description
                 title_match = re.search(r'<h2>(.*?)</h2>', module['content_html'])
                 desc_match = re.search(r'<div class="module-description">\s*<p>(.*?)</p>', module['content_html'], re.DOTALL)
 
-                module_title = title_match.group(1).strip() if title_match else f"Module {module['position']}"
-                module_description = desc_match.group(1).strip() if desc_match else ''
+                module_title = title_match.group(1) if title_match else f"Module {module['position']}"
+                module_description = desc_match.group(1).strip() if desc_match else ""
 
-                #get other module titles to avoid overlap
+                # Get other module titles to avoid overlap
                 other_modules = [m for m in all_modules if m['module_id'] != module['module_id']]
                 other_titles = []
-                for other_module in other_modules:
-                    other_title_match = re.search(r'<h2>(.*?)</h2>', other_module['content_html'])
+                for other in other_modules:
+                    other_title_match = re.search(r'<h2>(.*?)</h2>', other['content_html'])
                     if other_title_match:
-                        other_titles.append(other_title_match.group(1).strip())
+                        other_titles.append(other_title_match.group(1))
 
-                #generate learning outcomes using AI
-                prompt = f'''
-                Generate 3-5 specific learning outcomes for this module:
-                Course: {course['course_title']}
-                Course Description: {course['description']}
-                Module: {module_title}
-                Module Description: {module_description}
-                Other Modules: {', '.join(other_titles)}
+                # Generate learning outcomes
+                prompt = f"""Generate 3-5 specific learning outcomes for this module:
 
-                Requirements:
-                - Create 3-5 measurable learning outcomes
-                - Use action verbs (analyze, evaluate, create, apply, etc.)
-                - Be specific to this module only
-                - Avoid overlap with other modules
-                - Focus on what students will be able to DO after completing this module
+Course: {course['course_title']}
+Course Description: {course['description']}
+Module: {module_title}
+Module Description: {module_description}
+Other Modules: {', '.join(other_titles)}
 
-                Format as JSON array of strings:
-                ["Students will be able to...", "Students will be able to..."]
+Requirements:
+- Create 3-5 measurable learning outcomes
+- Use action verbs (analyze, evaluate, create, apply, etc.)
+- Be specific to this module only
+- Avoid overlap with other modules
+- Focus on what students will be able to DO after completing this module
 
-                Return ONLY the JSON array.
-                '''
+Format as JSON array of strings:
+["Students will be able to...", "Students will be able to..."]
+
+Return ONLY the JSON array."""
+
                 outcomes_response = generate_with_bedrock(prompt)
 
                 if outcomes_response:
-                    print(f"AI response for module {module['module_id']}: {outcomes_response}")
-                    logger.info(f"AI response for module {module['module_id']}: {outcomes_response}")
+                    print(f"Raw Bedrock response for learning outcomes: {outcomes_response}")
                     try:
+                        # Clean the response - extract JSON array
                         cleaned_response = outcomes_response.strip()
 
+                        # Extract just the JSON array from response
                         start_idx = cleaned_response.find('[')
                         end_idx = cleaned_response.rfind(']')
                         if start_idx != -1 and end_idx != -1:
                             cleaned_response = cleaned_response[start_idx:end_idx+1]
-                        if isinstance(json.loads(cleaned_response), list) and 3 <= len(json.loads(cleaned_response)) <=5:
-                            outcomes = (json.loads(cleaned_response))
+
+                        if isinstance(json.loads(cleaned_response), list) and 3 <= len(json.loads(cleaned_response)) <= 5:
+                            outcomes = json.loads(cleaned_response)
                         else:
-                            #try to find JSON array in the response
+                            # Try to find JSON array in the response
                             json_match = re.search(r'\[.*?\]', cleaned_response, re.DOTALL)
                             if json_match:
                                 json_str = json_match.group(0)
                                 outcomes = json.loads(json_str)
                             else:
-                                #parse the whole response as JSON
+                                # Try parsing the whole response as JSON
                                 outcomes = json.loads(cleaned_response)
 
-                        if isinstance(outcomes, list) and 3 <= len(outcomes) <=5:
-                            #save to database
-                            cursor.execute('''
-                                           UPDATE modules_master
-                                           SET learning_outcomes = %s
-                                             WHERE module_id = %s
-                                             ''', (json.dumps(outcomes), module['module_id']))
-                            print(f"Learning outcomes for module {module['module_id']} saved: {outcomes}")
-                            logger.info(f"Learning outcomes for module {module['module_id']} saved: {outcomes}")
+                        if isinstance(outcomes, list) and 3 <= len(outcomes) <= 5:
+                            # Save to database
+                            cursor.execute("""
+                                UPDATE modules_master
+                                SET learning_outcomes = %s
+                                WHERE module_id = %s
+                            """, (json.dumps(outcomes), module['module_id']))
                         else:
-                            #fallback outcomes
+                            # Fallback outcomes
                             fallback_outcomes = [
-                                f'Students will be able to understand key concepts of {module_title}.',
-                                f'Students will be able to apply principles related to {module_title}.',
-                                f'Students will be able to analyze topics covered in {module_title}.'
+                                f"Students will be able to understand the key concepts of {module_title}",
+                                f"Students will be able to apply principles learned in {module_title}",
+                                f"Students will be able to analyze scenarios related to {module_title}"
                             ]
-
-                            cursor.execute('''
-                                           UPDATE modules_master
-                                           SET learning_outcomes = %s
-                                           WHERE module_id = %s
-                                           ''', (json.dumps(fallback_outcomes), module['module_id']))
-                            print(f"AI-generated outcomes invalid for module {module['module_id']}. Used fallback outcomes.")
-                            logger.info(f"AI-generated outcomes invalid for module {module['module_id']}. Used fallback outcomes.")
+                            cursor.execute("""
+                                UPDATE modules_master
+                                SET learning_outcomes = %s
+                                WHERE module_id = %s
+                            """, (json.dumps(fallback_outcomes), module['module_id']))
                     except (json.JSONDecodeError, ValueError):
-                        #fallback outcomes
+                        # Fallback outcomes
                         fallback_outcomes = [
-                            f'Students will be able to understand key concepts of {module_title}.',
-                            f'Students will be able to apply principles related to {module_title}.',
-                            f'Students will be able to analyze topics covered in {module_title}.'
+                            f"Students will be able to understand the key concepts of {module_title}",
+                            f"Students will be able to apply principles learned in {module_title}",
+                            f"Students will be able to analyze scenarios related to {module_title}"
                         ]
-                        cursor.execute('''
-                                       UPDATE modules_master
-                                       SET learning_outcomes = %s
-                                       WHERE module_id = %s
-                                       ''', (json.dumps(fallback_outcomes), module['module_id']))
-                        print(f"Error parsing AI response for module {module['module_id']}. Used fallback outcomes.")
-                        logger.info(f"Error parsing AI response for module {module['module_id']}. Used fallback outcomes.")
-            db.commit()
+                        cursor.execute("""
+                            UPDATE modules_master
+                            SET learning_outcomes = %s
+                            WHERE module_id = %s
+                        """, (json.dumps(fallback_outcomes), module['module_id']))
 
             if specific_module_id:
-                message = 'Learning outcomes regenerated for the specified module'
+                return jsonify({
+                    'success': True,
+                    'message': 'Learning outcomes regenerated for module'
+                })
             else:
-                message = f'Learning outcomes generated for {len(modules)} modules'
-            return jsonify({'success': True, 'message': message}), 200
+                return jsonify({
+                    'success': True,
+                    'message': f'Learning outcomes generated for {len(modules)} modules'
+                })
     except Exception as e:
-        logger.error(f"Error generating learning outcomes: {str(e)}")
+        print(f"Generate outcomes error: {e}")
         traceback.print_exc()
         return jsonify({
             'success': False,
@@ -823,8 +973,8 @@ def generate_sections():
         if not module_id:
             return jsonify({
                 'success': False,
-                'message': 'module_id is required',
-                'error': 'module ID is required'
+                'message': 'Module ID required',
+                'error': 'Module ID required'
             }), 400
 
         db = get_db()
@@ -842,8 +992,8 @@ def generate_sections():
                 return jsonify({
                     'success': False,
                     'message': 'Module not found',
-                    'error': 'Module ID not found'
-                                }), 404
+                    'error': 'Module not found'
+                }), 404
 
             # Extract module title and description
             title_match = re.search(r'<h2>(.*?)</h2>', module_info['content_html'])
@@ -1009,12 +1159,10 @@ Return only the JSON array with 5 specific section names for {module_title}."""
         print(f"Generate sections error: {e}")
         traceback.print_exc()
         return jsonify({
-                        'success': False,
-                        'message': 'Error generating sections',
-                        'error': str(e)
-                        }), 500
-
-@modules_bp.route('/generate-section-content', methods=['POST'])
+            'success': False,
+            'message': 'Error generating sections',
+            'error': str(e)
+        }), 500@modules_bp.route('/generate-section-content', methods=['POST'])
 @jwt_required()
 def generate_section_content():
     try:
@@ -1026,7 +1174,7 @@ def generate_section_content():
                 'success': False,
                 'message': 'Section ID required',
                 'error': 'Section ID required'
-                }), 400
+            }), 400
 
         db = get_db()
         with db.cursor() as cursor:
@@ -1045,7 +1193,7 @@ def generate_section_content():
                         'success': False,
                         'message': 'Section not found',
                         'error': 'Section not found'
-                        }), 404
+                    }), 404
 
                 # Extract module title and description
                 title_match = re.search(r'<h2>(.*?)</h2>', section_info['content_html'])
@@ -1067,6 +1215,39 @@ def generate_section_content():
 
                 # Generate section content with retry mechanism
                 print(f"=== GENERATING CONTENT FOR SECTION: {section_info['title']} ===")
+
+                # Primary prompt (original working format)
+#                 primary_prompt = f"""Generate comprehensive educational content for this section:
+
+# Course: {section_info['course_title']}
+# Module: {module_title}
+# Section: {section_info['title']}
+
+# Other sections in this module (avoid overlapping with these):
+# {chr(10).join([f"- {title}" for title in other_section_titles])}
+
+# Create detailed content that:
+# - Explains concepts clearly for self-study (no teacher present)
+# - Includes multiple practical examples specific to "{section_info['title']}"
+# - Uses simple, educational language
+# - Provides step-by-step explanations where needed
+# - Is comprehensive enough for complete understanding of THIS SECTION ONLY
+# - Length: 4-5 paragraphs
+# - Focuses exclusively on "{section_info['title']}" content
+
+# Format the content with proper HTML structure:
+# - Use <h4> for subsection headings
+# - Use <p> for paragraphs
+# - Use <ul><li> for bullet points
+# - Use <strong> for emphasis
+# - For single-line code: <code>example</code>
+# - For multi-line code blocks: <pre><code>line 1
+# line 2
+# line 3</code></pre>
+
+# Write as if teaching a student directly. Include examples and explanations that make the topic clear and actionable.
+
+# Return ONLY the HTML-formatted educational content, no prefixes, no extra text."""
 
                 primary_prompt = f"""You are an expert educational content creator. Your task is to generate exceptionally comprehensive, fully self-contained content for the following section:
 
@@ -1108,6 +1289,22 @@ line 3</code></pre>
 """
 
 
+                # Secondary prompt (alternative format)
+#                 secondary_prompt = f"""Create educational content for "{section_info['title']}" in {section_info['course_title']}.
+
+# Topic: {section_info['title']}
+# Module: {module_title}
+# Avoid these topics: {', '.join(other_section_titles)}
+
+# Write detailed content covering:
+# 1. What {section_info['title']} is and why it matters
+# 2. How it works with specific examples
+# 3. Step-by-step implementation
+# 4. Real-world applications
+# 5. Common challenges and solutions
+
+# Use HTML formatting: <p>, <h4>, <strong>, <code>, <pre><code>
+# Write 4-5 comprehensive paragraphs with practical examples."""
                 secondary_prompt = f"""You are an expert instructional designer. Create exceptionally comprehensive, self-contained educational content for the following section:
 
 Course: {section_info['course_title']}
@@ -1243,7 +1440,7 @@ Other sections in this module (avoid overlap with these):
                     SET content = %s
                     WHERE section_id = %s
                 """, (content_response.strip(), section_id))
-                db.commit()
+
                 return jsonify({
                     'success': True,
                     'message': 'Section content generated successfully',
@@ -1253,9 +1450,9 @@ Other sections in this module (avoid overlap with these):
         print(f"Generate section content error: {e}")
         traceback.print_exc()
         return jsonify({
-            'error': str(e),
             'success': False,
-            'message': 'Error generating section content'
+            'message': 'Error generating section content',
+            'error': str(e)
         }), 500
 
 @modules_bp.route('/update-section-full', methods=['POST'])
@@ -1272,7 +1469,7 @@ def update_section_full():
                 'success': False,
                 'message': 'Section ID and title required',
                 'error': 'Section ID and title required'
-                }), 400
+            }), 400
 
         db = get_db()
         with db.cursor() as cursor:
@@ -1281,18 +1478,26 @@ def update_section_full():
                 SET title = %s, content = %s, updated_at = CURRENT_TIMESTAMP
                 WHERE section_id = %s
             """, (title, content or '', section_id))
-            db.commit()
-            if cursor.rowcount == 0:
-                return jsonify({'error': 'Section not found'}), 404
 
-            return jsonify({'message': 'Section updated successfully'})
+            if cursor.rowcount == 0:
+                return jsonify({
+                    'success': False,
+                    'message': 'Section not found',
+                    'error': 'Section not found'
+                }), 404
+
+            return jsonify({
+                'success': True,
+                'message': 'Section updated successfully'
+            })
     except Exception as e:
         print(f"Update section full error: {e}")
+        import traceback
         traceback.print_exc()
         return jsonify({
-            'error': str(e),
             'success': False,
-            'message': 'Error updating section'
+            'message': 'Error updating section',
+            'error': str(e)
         }), 500
 
 @modules_bp.route('/update-section', methods=['POST'])
@@ -1310,6 +1515,8 @@ def update_section():
 
         if not section_id or content is None:
             return jsonify({
+                'success': False,
+                'message': 'Section ID and content required',
                 'error': 'Section ID and content required'
             }), 400
 
@@ -1334,7 +1541,7 @@ def update_section():
                 SET content = %s, updated_at = CURRENT_TIMESTAMP
                 WHERE section_id = %s
             """, (content, section_id))
-            db.commit()
+
             print(f"✅ Updated {cursor.rowcount} row(s)")
 
             # Verify the update
@@ -1348,6 +1555,7 @@ def update_section():
             })
     except Exception as e:
         print(f"❌ Update section error: {e}")
+        import traceback
         traceback.print_exc()
         return jsonify({
             'success': False,
@@ -1376,6 +1584,8 @@ def insert_module():
             cursor.execute("SELECT course_id FROM courses_master WHERE course_id = %s", (course_id,))
             if not cursor.fetchone():
                 return jsonify({
+                    'success': False,
+                    'message': 'Course not found',
                     'error': 'Course not found'
                 }), 404
 
@@ -1396,11 +1606,12 @@ def insert_module():
 <div class="module-description">
     <p>{default_description}</p>
 </div>"""
+
             cursor.execute("""
                 INSERT INTO modules_master (course_id, position, content_html)
                 VALUES (%s, %s, %s)
             """, (course_id, new_position, content_html))
-            db.commit()
+
             new_module_id = cursor.lastrowid
 
             return jsonify({
@@ -1411,6 +1622,7 @@ def insert_module():
             })
     except Exception as e:
         print(f"Insert module error: {e}")
+        import traceback
         traceback.print_exc()
         return jsonify({
             'success': False,
@@ -1459,7 +1671,7 @@ def insert_section():
                 INSERT INTO module_sections (module_id, position, title, content)
                 VALUES (%s, %s, %s, %s)
             """, (module_id, new_position, default_title, ""))
-            db.commit()
+
             new_section_id = cursor.lastrowid
 
             return jsonify({
@@ -1470,13 +1682,13 @@ def insert_section():
             })
     except Exception as e:
         print(f"Insert section error: {e}")
+        import traceback
         traceback.print_exc()
         return jsonify({
             'success': False,
             'message': 'Error inserting section',
             'error': str(e)
         }), 500
-
 
 @modules_bp.route('/sections', methods=['GET'])
 @jwt_required()
@@ -1550,21 +1762,20 @@ def delete_section(section_id):
                 SET position = position - 1
                 WHERE module_id = %s AND position > %s
             """, (module_id, deleted_position))
-            db.commit()
+
             return jsonify({
                 'success': True,
                 'message': 'Section deleted successfully'
             })
     except Exception as e:
         print(f"Delete section error: {e}")
+        import traceback
         traceback.print_exc()
         return jsonify({
             'success': False,
             'message': 'Error deleting section',
             'error': str(e)
         }), 500
-
-
 @modules_bp.route('/export-single-module-pdf/<int:module_id>', methods=['GET'])
 @jwt_required()
 def export_single_module_enhanced_pdf(module_id):
@@ -1833,7 +2044,8 @@ def export_single_module_enhanced_pdf(module_id):
 def export_course_pdf(course_id):
     try:
         db = get_db()
-        with db.cursor() as cursor:
+        with db:
+            with db.cursor() as cursor:
                 # Get course info
                 cursor.execute("SELECT course_title, description FROM courses_master WHERE course_id = %s", (course_id,))
                 course = cursor.fetchone()
@@ -2054,7 +2266,7 @@ OUTPUT FORMAT (return only this JSON):
                     print(f"🔍 Extracted JSON: {json_str}")
 
                     # Clean the JSON string to handle control characters
-
+                    import re
                     # Remove control characters except newlines and tabs
                     cleaned_json = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', json_str)
                     # Fix common JSON issues
@@ -2107,6 +2319,7 @@ OUTPUT FORMAT (return only this JSON):
 
             except Exception as e:
                 print(f"❌ {prompt_name} attempt {attempt} error: {e}")
+                import traceback
                 traceback.print_exc()
 
         print(f"❌ {prompt_name} failed after {max_retries} attempts")
@@ -2194,6 +2407,7 @@ Learning objectives: {learning_outcomes_text}
                     json_str = ai_response[json_start:json_end]
 
                     # Clean the JSON string
+                    import re
                     cleaned_json = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', json_str)
                     cleaned_json = cleaned_json.replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t')
 
@@ -2278,7 +2492,8 @@ def generate_single_activity():
             }), 400
 
         db = get_db()
-        with db.cursor() as cursor:
+        with db:
+            with db.cursor() as cursor:
                 # Get module and course info for context
                 cursor.execute("""
                     SELECT m.content_html, m.learning_outcomes, c.course_title, c.description
@@ -2359,7 +2574,6 @@ def generate_single_activity():
                         VALUES (%s, %s, %s, %s, %s)
                     """, (module_id, next_position, activity['title'], activity['instructions'], activity_type))
 
-                db.commit()
                 print("SUCCESS: Database updated")
                 return jsonify({
                     'success': True,
@@ -2369,6 +2583,14 @@ def generate_single_activity():
     except Exception as e:
         print(f"Generate single activity error: {e}")
         traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'message': 'Error generating activity',
+            'error': str(e)
+        }), 500
+
+    except Exception as e:
+        print(f"ERROR: General exception - {e}")
         return jsonify({
             'success': False,
             'message': 'Error generating activity',
@@ -2399,11 +2621,10 @@ def get_activities():
                 'message': 'Module ID is required',
                 'error': 'Module ID is required'
             }), 400
-
         db = get_db()
         with db.cursor() as cursor:
-                cursor.execute("""
-                    SELECT activity_id, position, title, instructions, activity_type
+            cursor.execute("""
+                SELECT activity_id, position, title, instructions, activity_type
                     FROM module_activities
                     WHERE module_id = %s
                     ORDER BY position
@@ -2428,9 +2649,10 @@ def get_activities():
 def delete_activity(activity_id):
     try:
         db = get_db()
-        with db.cursor() as cursor:
+        with db:
+            with db.cursor() as cursor:
                 cursor.execute("DELETE FROM module_activities WHERE activity_id = %s", (activity_id,))
-                db.commit()
+
                 if cursor.rowcount == 0:
                     return jsonify({
                         'success': False,
@@ -2468,13 +2690,12 @@ def update_activity():
             }), 400
 
         db = get_db()
-        with db.cursor() as cursor:
+            with db.cursor() as cursor:
                 cursor.execute("""
                     UPDATE module_activities
                     SET title = %s, instructions = %s, updated_at = CURRENT_TIMESTAMP
                     WHERE activity_id = %s
                 """, (title, instructions, activity_id))
-                db.commit()
                 return jsonify({
                     'success': True,
                     'message': 'Activity updated successfully'
@@ -2510,7 +2731,6 @@ def clean_content_for_prompt(content):
 
     return text
 
-
 @modules_bp.route('/generate-exam-items', methods=['POST'])
 @jwt_required()
 def generate_exam_items():
@@ -2523,7 +2743,8 @@ def generate_exam_items():
             return jsonify({'error': 'Section ID required'}), 400
 
         db = get_db()
-        with db.cursor() as cursor:
+        with db:
+            with db.cursor() as cursor:
                 # Get section and module info
                 cursor.execute("""
                     SELECT s.title, s.content, m.content_html, c.course_title
@@ -2663,27 +2884,19 @@ Ensure questions match {difficulty} difficulty level."""
                 saved_items = []
                 for item in all_items:
                     cursor.execute("""
-                        INSERT INTO exam_items
-                        (section_id, question, option_a, option_b,
-                        option_c, option_d, correct_answer)
+                        INSERT INTO exam_items (section_id, question, option_a, option_b, option_c, option_d, correct_answer)
                         VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    """, (section_id, item['question'], item['option_a'],
-                          item['option_b'], item['option_c'],
-                          item['option_d'], item['correct_answer']))
+                    """, (section_id, item['question'], item['option_a'], item['option_b'], item['option_c'], item['option_d'], item['correct_answer']))
                     saved_items.append(item)
-                db.commit()
+
                 if saved_items:
-                    return jsonify({'success': True,
-                                    'items': saved_items,
-                                    'count': len(saved_items)})
+                    return jsonify({'success': True, 'items': saved_items, 'count': len(saved_items)})
 
                 # Fallback items if all attempts failed
                 fallback_items = []
                 for i in range(5):
                     cursor.execute("""
-                        INSERT INTO exam_items
-                        (section_id, question, option_a, option_b,
-                        option_c, option_d, correct_answer)
+                        INSERT INTO exam_items (section_id, question, option_a, option_b, option_c, option_d, correct_answer)
                         VALUES (%s, %s, %s, %s, %s, %s, %s)
                     """, (section_id, f"{difficulty.title()} Question {i+1} about {section_info['title']}?", "Option A", "Option B", "Option C", "Option D", "A"))
                     fallback_items.append({
@@ -2692,16 +2905,13 @@ Ensure questions match {difficulty} difficulty level."""
                         'correct_answer': "A"
                     })
 
-                return jsonify({'success': True,
-                                'items': fallback_items,
-                                'count': len(fallback_items)})
+                return jsonify({'success': True, 'items': fallback_items, 'count': len(fallback_items)})
     except Exception as e:
         return jsonify({
             'success': False,
             'message': 'Error generating exam items',
             'error': str(e)
         }), 500
-
 
 @modules_bp.route('/exam-items/manual-create', methods=['POST'])
 @jwt_required()
@@ -2716,8 +2926,7 @@ def create_manual_exam_item():
         option_d = data.get('option_d')
         correct_answer = data.get('correct_answer')
 
-        if not all([section_id, question, option_a,
-                    option_b, option_c, option_d, correct_answer]):
+        if not all([section_id, question, option_a, option_b, option_c, option_d, correct_answer]):
             return jsonify({
                 'success': False,
                 'message': 'All fields are required',
@@ -2725,19 +2934,17 @@ def create_manual_exam_item():
             }), 400
 
         db = get_db()
-        with db.cursor() as cursor:
-            # Insert the new exam item (without difficulty column)
-            cursor.execute("""
-                    INSERT INTO exam_items
-                    (section_id, question, option_a,
-                    option_b, option_c, option_d, correct_answer)
+        with db:
+            with db.cursor() as cursor:
+                # Insert the new exam item (without difficulty column)
+                cursor.execute("""
+                    INSERT INTO exam_items (section_id, question, option_a, option_b, option_c, option_d, correct_answer)
                     VALUES (%s, %s, %s, %s, %s, %s, %s)
-                """, (section_id, question, option_a,
-                      option_b, option_c, option_d, correct_answer))
-            db.commit()
-            item_id = cursor.lastrowid
+                """, (section_id, question, option_a, option_b, option_c, option_d, correct_answer))
 
-            return jsonify({
+                item_id = cursor.lastrowid
+
+                return jsonify({
                     'success': True,
                     'message': 'Exam item created successfully',
                     'item_id': item_id
@@ -2750,7 +2957,6 @@ def create_manual_exam_item():
             'error': str(e)
         }), 500
 
-
 @modules_bp.route('/activity-submissions/check/<int:activity_id>', methods=['GET'])
 @jwt_required()
 def check_student_activity_submission(activity_id):
@@ -2758,11 +2964,11 @@ def check_student_activity_submission(activity_id):
         user_id = int(get_jwt_identity())
 
         db = get_db()
-        with db.cursor() as cursor:
-            # Check if student has already submitted this activity
+        with db:
+            with db.cursor() as cursor:
+                # Check if student has already submitted this activity
                 cursor.execute("""
-                    SELECT submission_id, submission_content,
-                    submitted_at, status
+                    SELECT submission_id, submission_content, submitted_at, status
                     FROM activity_submissions
                     WHERE user_id = %s AND activity_id = %s
                 """, (user_id, activity_id))
@@ -2773,7 +2979,7 @@ def check_student_activity_submission(activity_id):
                     'success': True,
                     'message': 'Submission status retrieved',
                     'submission': submission
-                }), 200
+                })
 
     except Exception as e:
         return jsonify({
@@ -2781,7 +2987,6 @@ def check_student_activity_submission(activity_id):
             'message': 'Error checking submission',
             'error': str(e)
         }), 500
-
 
 @modules_bp.route('/activity-submissions/submit', methods=['POST'])
 @jwt_required()
@@ -2797,7 +3002,8 @@ def submit_student_activity():
             return jsonify({'error': 'Activity ID and content are required'}), 400
 
         db = get_db()
-        with db.cursor() as cursor:
+        with db:
+            with db.cursor() as cursor:
                 # Check if submission already exists
                 cursor.execute("""
                     SELECT submission_id, status FROM activity_submissions
@@ -2825,7 +3031,7 @@ def submit_student_activity():
                         VALUES (%s, %s, %s, 'submitted')
                     """, (user_id, activity_id, submission_content))
                     message = 'Activity submitted successfully'
-                db.commit()
+
                 return jsonify({
                     'success': True,
                     'message': message
@@ -2838,7 +3044,6 @@ def submit_student_activity():
             'error': str(e)
         }), 500
 
-
 @modules_bp.route('/student-quizzes/<int:course_id>', methods=['GET'])
 @jwt_required()
 def get_student_course_quizzes(course_id):
@@ -2847,7 +3052,8 @@ def get_student_course_quizzes(course_id):
         user_id = get_jwt_identity()
 
         db = get_db()
-        with db.cursor() as cursor:
+        with db:
+            with db.cursor() as cursor:
                 # Get student's course instance
                 cursor.execute("""
                     SELECT ci.instance_id FROM course_instances ci
@@ -2938,7 +3144,8 @@ def get_student_course_exams_grouped(course_id):
         user_id = get_jwt_identity()
 
         db = get_db()
-        with db.cursor() as cursor:
+        with db:
+            with db.cursor() as cursor:
                 # Get student's course instance
                 cursor.execute("""
                     SELECT ci.instance_id FROM course_instances ci
@@ -3033,7 +3240,8 @@ def get_student_exam_questions_unique(exam_id, instance_id):
         user_id = get_jwt_identity()
 
         db = get_db()
-        with db.cursor() as cursor:
+        with db:
+            with db.cursor() as cursor:
                 # Verify student is enrolled (exam results table doesn't exist yet, so no completion check)
                 cursor.execute("""
                     SELECT e.enrollment_id FROM enrollments e
@@ -3140,7 +3348,8 @@ def submit_exam_results_unique():
             return jsonify({'error': 'Missing required fields'}), 400
 
         db = get_db()
-        with db.cursor() as cursor:
+        with db:
+            with db.cursor() as cursor:
                 # Check if already submitted
                 cursor.execute("""
                     SELECT result_id FROM exam_results
@@ -3194,7 +3403,7 @@ def submit_exam_results_unique():
                     INSERT INTO exam_results (user_id, exam_type_id, instance_id, score, total_questions, correct_answers, answers, submission_reason)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 """, (user_id, exam_id, instance_id, score, total_items, correct_answers, json.dumps(answers), submission_reason))
-                db.commit()
+
                 return jsonify({
                     'success': True,
                     'score': round(score, 2),
@@ -3219,7 +3428,8 @@ def get_student_quiz_questions(quiz_id, instance_id):
         user_id = get_jwt_identity()
 
         db = get_db()
-        with db.cursor() as cursor:
+        with db:
+            with db.cursor() as cursor:
                 # Verify student is enrolled and hasn't taken the quiz
                 cursor.execute("""
                     SELECT COUNT(*) FROM enrollments e
@@ -3331,7 +3541,8 @@ def submit_student_quiz():
             return jsonify({'error': 'Missing required data'}), 400
 
         db = get_db()
-        with db.cursor() as cursor:
+        with db:
+            with db.cursor() as cursor:
                 # Verify student hasn't already taken this quiz
                 cursor.execute("""
                     SELECT COUNT(*) FROM quiz_results
@@ -3369,7 +3580,7 @@ def submit_student_quiz():
                     INSERT INTO quiz_results (user_id, exam_type_id, instance_id, score, total_questions, correct_answers, completed_at)
                     VALUES (%s, %s, %s, %s, %s, %s, NOW())
                 """, (user_id, quiz_id, instance_id, score, total_questions, correct_count))
-                db.commit()
+
                 return jsonify({
                     'success': True,
                     'score': round(score, 2),
@@ -3391,7 +3602,8 @@ def get_single_submission_for_grading(submission_id):
     """Get a single submission for grading modal"""
     try:
         db = get_db()
-        with db.cursor() as cursor:
+        with db:
+            with db.cursor() as cursor:
                 cursor.execute("""
                     SELECT
                         asub.submission_id,
@@ -3450,7 +3662,8 @@ def get_student_activities_with_grade_status(module_id):
         user_id = get_jwt_identity()
 
         db = get_db()
-        with db.cursor() as cursor:
+        with db:
+            with db.cursor() as cursor:
                 # Get activities with submission status and grades
                 cursor.execute("""
                     SELECT
@@ -3530,7 +3743,8 @@ def track_student_section_progress():
             return jsonify({'error': 'Section ID required'}), 400
 
         db = get_db()
-        with db.cursor() as cursor:
+        with db:
+            with db.cursor() as cursor:
                 # Check if progress record already exists
                 cursor.execute("""
                     SELECT progress_id FROM student_progress
@@ -3552,7 +3766,7 @@ def track_student_section_progress():
                         SET is_completed = 1, completed_at = NOW()
                         WHERE user_id = %s AND section_id = %s AND is_completed = 0
                     """, (user_id, section_id))
-                db.commit()
+
                 return jsonify({'success': True})
 
     except Exception as e:
@@ -3571,7 +3785,8 @@ def get_student_module_progress_data(module_id):
         user_id = get_jwt_identity()
 
         db = get_db()
-        with db.cursor() as cursor:
+        with db:
+            with db.cursor() as cursor:
                 # Get total sections in the module
                 cursor.execute("""
                     SELECT COUNT(*) FROM module_sections WHERE module_id = %s
@@ -3636,7 +3851,8 @@ def get_submission_tracking():
         search_term = request.args.get('search', '')
 
         db = get_db()
-        with db.cursor() as cursor:
+        with db:
+            with db.cursor() as cursor:
                 # Get course instances with basic info
                 query = """
                 SELECT ci.instance_id, ci.course_id, cm.course_code, cm.course_title, ci.term_code
@@ -3744,6 +3960,7 @@ def get_submission_tracking():
 
     except Exception as e:
         print(f"Error in submission tracking: {str(e)}")
+        import traceback
         traceback.print_exc()
         return jsonify({
             'success': False,
@@ -3756,7 +3973,8 @@ def get_submission_tracking():
 def get_courses_with_pending_counts():
     try:
         db = get_db()
-        with db.cursor() as cursor:
+        with db:
+            with db.cursor() as cursor:
                 search = request.args.get('search', '')
 
                 # Query to get course instances with pending submissions
@@ -3824,7 +4042,8 @@ def get_courses_with_pending_counts():
 def get_pending_submissions_count(course_id):
     try:
         db = get_db()
-        with db.cursor() as cursor:
+        with db:
+            with db.cursor() as cursor:
                 cursor.execute("""
                     SELECT COUNT(*) as count
                     FROM activity_submissions asub
@@ -3848,7 +4067,8 @@ def get_pending_submissions_count(course_id):
 def get_course_activities_for_grading(instance_id):
     try:
         db = get_db()
-        with db.cursor() as cursor:
+        with db:
+            with db.cursor() as cursor:
                 cursor.execute("""
                     SELECT
                         ma.activity_id,
@@ -3890,18 +4110,15 @@ def get_course_activities_for_grading(instance_id):
                 return jsonify({'activities': activities})
 
     except Exception as e:
-        return jsonify({
-            'success': False,
-            'message': 'Error getting course activities for grading',
-            'error': str(e)
-        }), 500
+        return jsonify({'error': str(e)}), 500
 
 @modules_bp.route('/activity-grading/submissions/<int:activity_id>', methods=['GET'])
 @jwt_required()
 def get_activity_submissions_for_grading(activity_id):
     try:
         db = get_db()
-        with db.cursor() as cursor:
+        with db:
+            with db.cursor() as cursor:
                 cursor.execute("""
                     SELECT
                         asub.submission_id,
@@ -3922,11 +4139,7 @@ def get_activity_submissions_for_grading(activity_id):
                 return jsonify(submissions)
 
     except Exception as e:
-        return jsonify({
-            'success': False,
-            'message': 'Error getting activity submissions for grading',
-            'error': str(e)
-        }), 500
+        return jsonify({'error': str(e)}), 500
 
 @modules_bp.route('/activity-grading/grade', methods=['POST'])
 @jwt_required()
@@ -3944,24 +4157,21 @@ def save_activity_grade():
             return jsonify({'error': 'Grade must be between 0 and 100'}), 400
 
         db = get_db()
-        with db.cursor() as cursor:
+        with db:
+            with db.cursor() as cursor:
                 cursor.execute("""
                     UPDATE activity_submissions
                     SET grade = %s, feedback = %s, status = 'graded', updated_at = CURRENT_TIMESTAMP
                     WHERE submission_id = %s
                 """, (grade, feedback, submission_id))
-                db.commit()
+
                 return jsonify({
                     'success': True,
                     'message': 'Grade saved successfully'
                 })
 
     except Exception as e:
-        return jsonify({
-            'success': False,
-            'message': 'Error saving grade',
-            'error': str(e)
-            }), 500
+        return jsonify({'error': str(e)}), 500
 
 @modules_bp.route('/activity-grading/ai-grade', methods=['POST'])
 @jwt_required()
@@ -3977,6 +4187,7 @@ def ai_grade_submission():
             return jsonify({'error': 'Missing required data for AI grading'}), 400
 
         # Clean HTML from instructions
+        import re
         clean_instructions = re.sub('<[^<]+?>', '', activity_instructions)
 
         # Define 3 different prompts for AI grading
@@ -4095,7 +4306,8 @@ def get_exam_items():
             return jsonify({'error': 'Section ID required'}), 400
 
         db = get_db()
-        with db.cursor() as cursor:
+        with db:
+            with db.cursor() as cursor:
                 cursor.execute("""
                     SELECT item_id, question, option_a, option_b, option_c, option_d, correct_answer
                     FROM exam_items
@@ -4106,11 +4318,7 @@ def get_exam_items():
                 return jsonify({'items': items})
 
     except Exception as e:
-        return jsonify({
-            'success': False,
-            'message': 'Error fetching exam items',
-            'error': str(e)
-            }), 500
+        return jsonify({'error': str(e)}), 500
 
 @modules_bp.route('/update-exam-item', methods=['POST'])
 @jwt_required()
@@ -4129,38 +4337,32 @@ def update_exam_item():
             return jsonify({'error': 'All fields required'}), 400
 
         db = get_db()
-        with db.cursor() as cursor:
+        with db:
+            with db.cursor() as cursor:
                 cursor.execute("""
                     UPDATE exam_items
                     SET question = %s, option_a = %s, option_b = %s, option_c = %s, option_d = %s, correct_answer = %s
                     WHERE item_id = %s
                 """, (question, option_a, option_b, option_c, option_d, correct_answer, item_id))
-                db.commit()
+
                 return jsonify({'success': True})
 
     except Exception as e:
-        return jsonify({
-            'success': False,
-            'message': 'Error updating exam item',
-            'error': str(e)
-            }), 500
+        return jsonify({'error': str(e)}), 500
 
 @modules_bp.route('/delete-exam-item/<int:item_id>', methods=['DELETE'])
 @jwt_required()
 def delete_exam_item(item_id):
     try:
         db = get_db()
-        with db.cursor() as cursor:
+        with db:
+            with db.cursor() as cursor:
                 cursor.execute("DELETE FROM exam_items WHERE item_id = %s", (item_id,))
 
                 return jsonify({'success': True})
 
     except Exception as e:
-        return jsonify({
-            'success': False,
-            'message': 'Error deleting exam item',
-            'error': str(e)
-            }), 500
+        return jsonify({'error': str(e)}), 500
 
 @modules_bp.route('/export-exam-items-pdf/<int:module_id>', methods=['GET'])
 @jwt_required()
@@ -4175,7 +4377,8 @@ def export_exam_items_pdf(module_id):
         from flask import make_response
 
         db = get_db()
-        with db.cursor() as cursor:
+        with db:
+            with db.cursor() as cursor:
                 # Get module and course information
                 cursor.execute("""
                     SELECT m.content_html, c.course_code, c.course_title, m.position
@@ -4189,6 +4392,7 @@ def export_exam_items_pdf(module_id):
                     return jsonify({'error': 'Module not found'}), 404
 
                 # Extract module title from HTML content
+                import re
                 from html import unescape
                 content_text = re.sub('<[^<]+?>', '', module_info['content_html'])
                 content_text = unescape(content_text)
@@ -4337,11 +4541,7 @@ def export_exam_items_pdf(module_id):
     except ImportError:
         return jsonify({'error': 'PDF generation library not available. Please install reportlab.'}), 500
     except Exception as e:
-        return jsonify({
-            'success': False,
-            'message': 'Error exporting exam items to PDF',
-            'error': str(e)
-            }), 500
+        return jsonify({'error': str(e)}), 500
 
 @modules_bp.route('/export-all-exam-items-pdf/<int:course_id>', methods=['GET'])
 @jwt_required()
@@ -4356,7 +4556,8 @@ def export_all_exam_items_pdf(course_id):
         from flask import make_response
 
         db = get_db()
-        with db.cursor() as cursor:
+        with db:
+            with db.cursor() as cursor:
                 # Get course information
                 cursor.execute("""
                     SELECT course_code, course_title, description
@@ -4387,6 +4588,7 @@ def export_all_exam_items_pdf(course_id):
                     module_id = row['module_id']
                     if module_id not in modules_data:
                         # Extract module title from HTML content
+                        import re
                         from html import unescape
                         content_text = re.sub('<[^<]+?>', '', row['content_html'] or '')
                         content_text = unescape(content_text)
@@ -4552,11 +4754,7 @@ def export_all_exam_items_pdf(course_id):
     except ImportError:
         return jsonify({'error': 'PDF generation library not available. Please install reportlab.'}), 500
     except Exception as e:
-        return jsonify({
-            'success': False,
-            'message': 'Error exporting all exam items to PDF',
-            'error': str(e)
-            }), 500
+        return jsonify({'error': str(e)}), 500
 
 # Aiken Format TXT Export Routes
 @modules_bp.route('/export-aiken-txt-single-module/<int:module_id>', methods=['GET'])
@@ -4564,7 +4762,8 @@ def export_all_exam_items_pdf(course_id):
 def export_aiken_txt_single_module(module_id):
     try:
         db = get_db()
-        with db.cursor() as cursor:
+        with db:
+            with db.cursor() as cursor:
                 # Get module and course info
                 cursor.execute("""
                     SELECT m.content_html, m.position, c.course_code, c.course_title
@@ -4632,18 +4831,15 @@ def export_aiken_txt_single_module(module_id):
                 return response
 
     except Exception as e:
-        return jsonify({
-            'success': False,
-            'message': 'Error exporting exam items to Aiken format',
-            'error': str(e)
-            }), 500
+        return jsonify({'error': str(e)}), 500
 
 @modules_bp.route('/export-aiken-txt-all-modules/<int:course_id>', methods=['GET'])
 @jwt_required()
 def export_aiken_txt_all_modules(course_id):
     try:
         db = get_db()
-        with db.cursor() as cursor:
+        with db:
+            with db.cursor() as cursor:
                 # Get course info
                 cursor.execute("""
                     SELECT course_code, course_title
@@ -4726,11 +4922,7 @@ def export_aiken_txt_all_modules(course_id):
                 return response
 
     except Exception as e:
-        return jsonify({
-            'success': False,
-            'message': 'Error exporting exam items to Aiken format',
-            'error': str(e)
-            }), 500
+        return jsonify({'error': str(e)}), 500
 @modules_bp.route('/course-overview-stats/<int:course_id>', methods=['GET'])
 @jwt_required()
 def get_student_course_overview_stats_unique(course_id):
@@ -4738,7 +4930,8 @@ def get_student_course_overview_stats_unique(course_id):
     try:
         user_id = get_jwt_identity()
         db = get_db()
-        with db.cursor() as cursor:
+        with db:
+            with db.cursor() as cursor:
                 # Verify student enrollment in this course
                 cursor.execute("""
                     SELECT ci.instance_id
@@ -4862,7 +5055,8 @@ def get_student_course_progress_comprehensive(course_id):
     try:
         user_id = get_jwt_identity()
         db = get_db()
-        with db.cursor() as cursor:
+        with db:
+            with db.cursor() as cursor:
                 # Verify student enrollment
                 cursor.execute("""
                     SELECT ci.instance_id
@@ -5018,7 +5212,8 @@ def get_student_comprehensive_grades(course_id):
     try:
         user_id = get_jwt_identity()
         db = get_db()
-        with db.cursor() as cursor:
+        with db:
+            with db.cursor() as cursor:
                 # Verify student enrollment
                 cursor.execute("""
                     SELECT ci.instance_id, cm.course_code, cm.course_title
@@ -5146,7 +5341,8 @@ def get_student_overall_learning_progress():
     try:
         user_id = get_jwt_identity()
         db = get_db()
-        with db.cursor() as cursor:
+        with db:
+            with db.cursor() as cursor:
                 # Get all active course instances the student is enrolled in
                 cursor.execute("""
                     SELECT DISTINCT ci.instance_id, ci.course_id
