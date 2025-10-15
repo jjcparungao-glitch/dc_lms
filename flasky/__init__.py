@@ -4,7 +4,7 @@ from flask_jwt_extended import JWTManager
 from dotenv import load_dotenv
 import os
 
-from init_db import init_app
+from init_db import get_db, init_app
 
 
 def create_app():
@@ -12,12 +12,20 @@ def create_app():
     init_app(app)
     # Load environment variables
     load_dotenv()
-    
+
     # JWT Configuration
     app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'devsecret')
     app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET', 'devsecret')
-    app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(days=int(os.getenv('ACCESS_TOKEN_EXPIRES_DAYS', 1)))
-    app.config['JWT_TOKEN_LOCATION'] = ['localstorage']
+    app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(minutes=int(os.getenv('JWT_EXP_MINUTES', 15)))
+    app.config['JWT_REFRESH_TOKEN_EXPIRES'] = timedelta(days=int(os.getenv('REFRESH_EXP_DAYS', 7)))
+    app.config['JWT_TOKEN_LOCATION'] = ['cookies']
+    app.config['JWT_COOKIE_SECURE'] = False
+    app.config['JWT_COOKIE_SAMESITE'] = 'Lax'
+    app.config['JWT_COOKIE_CSRF_PROTECT'] = True
+    app.config["JWT_ACCESS_COOKIE_NAME"] = "access_token_cookie"
+    app.config["JWT_REFRESH_COOKIE_NAME"] = "refresh_token_cookie"
+    app.config["JWT_ACCESS_CSRF_COOKIE_NAME"] = "csrf_access_token"
+    app.config["JWT_REFRESH_CSRF_COOKIE_NAME"] = "csrf_refresh_token"
     app.config['JWT_ALGORITHM'] = 'HS256'
 
     #ROUTES IMPORTS
@@ -32,8 +40,9 @@ def create_app():
     from routes.dashboard import dashboard_bp
     from routes.enrollments import enrollments_bp
     from routes.database import database_bp
-    
-    
+
+
+
     #BLUEPRINTS
     app.register_blueprint(views, url_prefix='/')
     app.register_blueprint(auth_bp, url_prefix='/api/auth')
@@ -46,10 +55,20 @@ def create_app():
     app.register_blueprint(dashboard_bp, url_prefix='/api/dashboard')
     app.register_blueprint(enrollments_bp, url_prefix='/api/enrollments')
     app.register_blueprint(database_bp, url_prefix='/api/database')
-    
+
 
     # Initialize JWT Manager
     jwt = JWTManager(app)
+    @jwt.token_in_blocklist_loader
+    def check_if_token_revoked(jwt_header, jwt_payload):
+        jti = jwt_payload.get("jti")
+        try:
+            db = get_db()
+            with db.cursor() as cur:
+                cur.execute("SELECT 1 FROM token_blocklist WHERE jti = %s", (jti,))
+            return cur.fetchone() is not None
+        except:
+            return True  # fail-safe: block token if DB fails
 
 # --- Register Blueprints ---
     from routes.auth import auth
