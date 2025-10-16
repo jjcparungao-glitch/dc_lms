@@ -1,13 +1,12 @@
 from flask import Blueprint, request, jsonify
-from flask_jwt_extended import jwt_required
 from init_db import get_db
-from utils import logger
+from utils import logger,api_key_required
 import pymysql
 
 exam_types_bp = Blueprint('exam_types', __name__)
 
 @exam_types_bp.route('/', methods=['GET'])
-@jwt_required()
+@api_key_required
 def get_exam_types():
     search = request.args.get('search', '').strip()
     page = int(request.args.get('page', 1))
@@ -76,7 +75,7 @@ def get_exam_types():
         return jsonify({"error": "Internal server error"}), 500
 
 @exam_types_bp.route('/', methods=['POST'])
-@jwt_required()
+@api_key_required
 def create_exam_type():
     try:
         data =request.get_json()
@@ -117,7 +116,7 @@ def create_exam_type():
         return jsonify({'success': False, 'message': 'Error creating exam type', 'error': str(e)}), 500
 
 @exam_types_bp.route('/<int:exam_type_id>', methods=['PUT'])
-@jwt_required()
+@api_key_required
 def update_exam_type(exam_type_id):
     try:
         data = request.get_json()
@@ -161,7 +160,7 @@ def update_exam_type(exam_type_id):
         return jsonify({'success': False, 'message': 'Error updating exam type', 'error': str(e)}), 500
 
 @exam_types_bp.route('/<int:exam_type_id>', methods=['DELETE'])
-@jwt_required()
+@api_key_required
 def delete_exam_type(exam_type_id):
     try:
         db = get_db()

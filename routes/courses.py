@@ -1,48 +1,13 @@
 from flask import Blueprint, request, jsonify, make_response
-from flask_jwt_extended import jwt_required
 import csv
 import io
-import requests
-import os
-import boto3
-import json
 from init_db import get_db
-from utils import logger
+from utils import logger, api_key_required
 
 courses_bp = Blueprint('courses', __name__)
-# AWS Bedrock configuration
-model_id = "meta.llama3-70b-instruct-v1:0"
-
-def get_bedrock_client():
-    """Initialize and return a boto3 Bedrock client."""
-    return boto3.client(
-        'bedrock-runtime',
-        region_name=os.getenv('AWS_REGION', 'us-west-2'),
-        aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
-        aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY')
-    )
-
-def generate_with_bedrock(prompt, temperature=0.7):
-    try:
-        bedrock = get_bedrock_client()
-        response = bedrock.invoke_model(
-            modelId=model_id,
-            body=json.dumps({
-                "prompt": prompt,
-                "max_gen_len": 4096,
-                "temperature": temperature,
-                "top_p": 0.9,
-            }),
-        )
-        result = json.loads(response['body'].read())
-        return result['generation']
-    except Exception as e:
-        logger.error(f"Bedrock generation error: {str(e)}")
-        print(f"Bedrock generation error: {str(e)}")
-        return None
 
 @courses_bp.route('/', methods=['GET'])
-@jwt_required()
+@api_key_required
 def get_courses():
     try:
         page = int(request.args.get('page', 1))
@@ -97,10 +62,10 @@ def get_courses():
             }), 200
     except Exception as e:
         logger.error(f"Error fetching courses: {e}")
-        return jsonify({'success': False, 'message': str(e)}), 500
+        return jsonify({'success': False, 'message': 'Error fetching courses', 'error': str(e)}), 500
 
 @courses_bp.route('/<int:course_id>', methods=['PUT'])
-@jwt_required()
+@api_key_required
 def update_course(course_id):
     try:
         data = request.get_json()
@@ -111,7 +76,7 @@ def update_course(course_id):
         print(f"Updating course {course_id} with code '{course_code}', title '{course_title}'")
 
         if not course_code or not course_title:
-            return jsonify({'success': False, 'message': 'Course code and title are required'}), 400
+            return jsonify({'success': False, 'message': 'Course code and title are required', 'error': 'Course code and title are required'}), 400
 
         db = get_db()
         with db.cursor() as cursor:
@@ -120,7 +85,7 @@ def update_course(course_id):
             """, (course_id,))
             existing_course = cursor.fetchone()
             if not existing_course:
-                return jsonify({'success': False, 'message': 'Course not found'}), 404
+                return jsonify({'success': False, 'message': 'Course not found', 'error': 'Course not found'}), 404
 
             updates = []
             params = []
@@ -151,11 +116,10 @@ def update_course(course_id):
 
     except Exception as e:
         logger.error(f"Error updating course: {e}")
-        db.rollback()
-        return jsonify({'success': False, 'message': str(e)}), 500
+        return jsonify({'success': False, 'message': 'Error updating course', 'error': str(e)}), 500
 
 @courses_bp.route('/<int:course_id>', methods=['DELETE'])
-@jwt_required()
+@api_key_required
 def delete_course(course_id):
     try:
         db = get_db()
@@ -165,7 +129,7 @@ def delete_course(course_id):
             """, (course_id,))
             existing_course = cursor.fetchone()
             if not existing_course:
-                return jsonify({'success': False, 'message': 'Course not found'}), 404
+                return jsonify({'success': False, 'message': 'Course not found', 'error': 'Course not found'}), 404
 
             cursor.execute("""
                 DELETE FROM courses_master WHERE course_id = %s
@@ -175,11 +139,10 @@ def delete_course(course_id):
             return jsonify({'success': True, 'message': 'Course deleted successfully'}), 200
     except Exception as e:
         logger.error(f"Error deleting course: {e}")
-        db.rollback()
-        return jsonify({'success': False, 'message': str(e)}), 500
+        return jsonify({'success': False, 'message': 'Error deleting course', 'error': str(e)}), 500
 
 @courses_bp.route('/upload-csv', methods=['POST'])
-@jwt_required()
+@api_key_required
 def upload_csv():
     try:
         if 'file' not in request.files:
@@ -220,6 +183,7 @@ def upload_csv():
                     created_count += 1
 
                 except Exception as e:
+                    logger.error(f"Error processing row {row_num}: {e}")
                     errors.append(f"Row {row_num}: {str(e)}")
 
             db.commit()
@@ -234,71 +198,10 @@ def upload_csv():
 
     except Exception as e:
         logger.error(f"Error uploading CSV: {e}")
-        db.rollback()
-        return jsonify({'success': False, 'message': str(e)}), 500
-
-@courses_bp.route('/generate-description', methods=['POST'])
-@jwt_required()
-def generate_description():
-    try:
-        data = request.get_json()
-        course_code = data.get('course_code', '').strip()
-        course_title = data.get('course_title', '').strip()
-
-        if not course_code or not course_title:
-            return jsonify({'success': False, 'message': 'Course code and title are required'}), 400
-
-        # Strict prompt for course description only
-        prompt = f"""Generate ONLY a course description for: {course_code} - {course_title}
-
-Requirements:
-- Write ONLY the course description paragraph
-- Do NOT include course objectives, learning outcomes, prerequisites, or target audience
-- Do NOT include any headers, titles, or formatting
-- Keep it to exactly one paragraph (3-4 sentences)
-- Focus on what the course covers and teaches
-- Use academic language suitable for a course catalog
-
-Course: {course_code} - {course_title}
-
-Description:"""
-
-        print(f"Generating description with prompt: {prompt}")
-
-        raw_description = generate_with_bedrock(prompt, temperature=0.7)
-
-        if raw_description:
-            lines = raw_description.split('\n')
-            description = ''
-            for line in lines:
-                line = line.strip()
-                if line and not line.startswith(('Course:', 'Description:', '**', '#', '-', '•')):
-                    if not description:
-                        description = line
-                    elif len(description.split('.')) < 4:
-                        description += ' ' + line
-                    else:
-                        break
-
-            description = description.replace('Description:', '').strip()
-            print(f"Generated description: {description}")
-
-            return jsonify({
-                'success': True,
-                'description': description,
-                'generated': True,
-            })
-        else:
-            return jsonify({'success': False, 'message': 'Failed to generate description'}), 500
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Request error during description generation: {e}")
-        return jsonify({'success': False, 'message': 'Error communicating with AI service'}), 500
-    except Exception as e:
-        logger.error(f"Error generating description: {e}")
         return jsonify({'success': False, 'message': str(e)}), 500
 
 @courses_bp.route('/export-csv', methods=['GET'])
-@jwt_required()
+@api_key_required
 def export_csv():
     try:
         db = get_db()

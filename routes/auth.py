@@ -1,8 +1,8 @@
 
-from asyncio.log import logger
+from utils import logger
 from datetime import datetime, timezone
 from flask import Blueprint, request, jsonify
-from flask_jwt_extended import create_access_token, create_refresh_token, decode_token, get_jwt, jwt_required, get_jwt_identity, set_access_cookies, set_refresh_cookies, unset_jwt_cookies
+from flask_jwt_extended import create_access_token, create_refresh_token,get_jwt, jwt_required, get_jwt_identity, set_access_cookies, set_refresh_cookies, unset_jwt_cookies
 import bcrypt
 
 from init_db import get_db
@@ -24,64 +24,40 @@ def login():
         with db.cursor() as cur:
             cur.execute("SELECT user_id, password_hash, full_name, role FROM users WHERE external_id = %s", (external_id,))
             user = cur.fetchone()
+            role = user.get('role') if user else None
 
-            if user and bcrypt.checkpw(password.encode('utf-8'), user['password_hash'].encode('utf-8')):
-                # Create new token
-                access_token = create_access_token(
-                    identity=str(user['user_id']),
-                    additional_claims={
-                        'role': user['role'],
-                        'external_id': external_id,
-                        'full_name': user['full_name']}
-                )
-                refresh_token = create_refresh_token(
-                    identity=str(user['user_id']),
-                    additional_claims={
-                        'role': user['role'],
-                        'external_id': external_id,
-                        'full_name': user['full_name']
-                    }
-                )
-                resp = jsonify({'success': True, 'message': 'Login successful'})
-                set_access_cookies(resp, access_token)
-                set_refresh_cookies(resp, refresh_token)
-                return resp, 200
-            else:
+            # validate credentials
+            if not user or not bcrypt.checkpw(password.encode('utf-8'), user['password_hash'].encode('utf-8')):
                 return jsonify({'success': False, 'message': 'Invalid credentials', 'error': 'Invalid credentials'}), 401
+
+            # enforce admin-only login
+            if not role or role.lower().strip() != 'admin':
+                print(f"Non-admin login attempt by user {external_id} with role {role}")
+                return jsonify({'success': False, 'message': 'Forbidden: admin access required'}), 403
+
+            # Create new token for admin user
+            access_token = create_access_token(
+                identity=str(user['user_id']),
+                additional_claims={
+                    'role': user['role'],
+                    'external_id': external_id,
+                    'full_name': user['full_name']}
+            )
+            refresh_token = create_refresh_token(
+                identity=str(user['user_id']),
+                additional_claims={
+                    'role': user['role'],
+                    'external_id': external_id,
+                    'full_name': user['full_name']
+                }
+            )
+            resp = jsonify({'success': True, 'message': 'Login successful'})
+            set_access_cookies(resp, access_token)
+            set_refresh_cookies(resp, refresh_token)
+            return resp, 200
     except Exception as e:
         logger.error(f"Error during login: {str(e)}")
         return jsonify({'success': False, 'message': 'An error occurred during login', 'error': str(e)}), 500
-
-@auth_bp.route('/api-key', methods=['POST'])
-def generate_api_key():
-    try:
-        data = request.get_json()
-        external_id = data.get('external_id')
-        password = data.get('password')
-
-        if not external_id or not password:
-            return jsonify({'success': False, 'message': 'External ID and password are required'}), 400
-
-        db = get_db()
-        with db.cursor() as cur:
-            cur.execute("SELECT user_id, password_hash, full_name, role FROM users WHERE external_id = %s", (external_id,))
-            user = cur.fetchone()
-
-            if user and bcrypt.checkpw(password.encode('utf-8'), user['password_hash'].encode('utf-8')):
-                # Create new token
-                access_token = create_access_token(
-                    identity=str(user['user_id']),
-                    additional_claims={
-                        'role': user['role'],
-                        'external_id': external_id,
-                        'full_name': user['full_name']}
-                )
-                return jsonify({'success': True, 'api_key': access_token}), 200
-            else:
-                return jsonify({'success': False, 'message': 'Invalid credentials', 'error': 'Invalid credentials'}), 401
-    except Exception as e:
-        logger.error(f"Error during API key generation: {str(e)}")
-        return jsonify({'success': False, 'message': 'An error occurred during API key generation', 'error': str(e)}), 500
 
 @auth_bp.route('/refresh', methods=['POST'])
 @jwt_required(refresh=True)
@@ -94,9 +70,9 @@ def refresh():
         full_name = claims.get('full_name')
 
         logger.info(f"Refreshing token for user {ident} with role {role}")
-        new_access = create_access_token(identity=ident, additional_claims={'role': role, 'external_id': external_id, 'full_name': full_name})
+        access_token = create_access_token(identity=ident, additional_claims={'role': role, 'external_id': external_id, 'full_name': full_name})
         resp = jsonify({'success': True, 'message': 'Token refreshed'})
-        set_access_cookies(resp, new_access)
+        set_access_cookies(resp, access_token)
 
         return resp, 200
     except Exception as e:

@@ -1,15 +1,15 @@
 from flask import Blueprint, request, jsonify
-from flask_jwt_extended import jwt_required, get_jwt_identity
 import bcrypt
 import csv
 import io
+
 from init_db import get_db
-from utils import logger
+from utils import logger, api_key_required
 
 users_bp = Blueprint('users', __name__)
 
 @users_bp.route('/', methods=['GET'])
-@jwt_required()
+@api_key_required
 def get_users():
     try:
         logger.info("Getting users...")
@@ -24,7 +24,7 @@ def get_users():
         return jsonify({'error': str(e)}), 500
 
 @users_bp.route('/', methods=['POST'])
-@jwt_required()
+@api_key_required
 def create_user():
     try:
         print("Creating user...")
@@ -58,7 +58,7 @@ def create_user():
         return jsonify({'error': str(e)}), 500
 
 @users_bp.route('/<int:user_id>', methods=['PUT'])
-@jwt_required()
+@api_key_required
 def update_user(user_id):
     try:
         print(f"Updating user ID: {user_id}")
@@ -120,7 +120,7 @@ def update_user(user_id):
         return jsonify({'error': str(e)}), 500
 
 @users_bp.route('/<int:user_id>', methods=['DELETE'])
-@jwt_required()
+@api_key_required
 def delete_user(user_id):
     try:
         db = get_db()
@@ -136,7 +136,7 @@ def delete_user(user_id):
         return jsonify({'error': str(e)}), 500
 
 @users_bp.route('/upload-csv', methods=['POST'])
-@jwt_required()
+@api_key_required
 def upload_csv():
     try:
         if 'file' not in request.files:

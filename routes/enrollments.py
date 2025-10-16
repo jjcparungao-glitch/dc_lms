@@ -1,15 +1,14 @@
 import csv
 import io
 from flask import Blueprint, make_response, request, jsonify
-from flask_jwt_extended import jwt_required
 from init_db import get_db
-from utils import logger
+from utils import logger, api_key_required
 
 enrollments_bp = Blueprint('enrollments', __name__)
 
 
 @enrollments_bp.route('/student/<int:student_id>', methods=['GET'])
-@jwt_required()
+@api_key_required
 def get_student_enrollments(student_id):
     try:
         db = get_db()
@@ -43,7 +42,7 @@ def get_student_enrollments(student_id):
                         }), 500
 
 @enrollments_bp.route('/', methods=['GET'])
-@jwt_required()
+@api_key_required
 def get_enrollments():
     try:
         page = int(request.args.get('page', 1))
@@ -137,7 +136,7 @@ def get_enrollments():
 
 
 @enrollments_bp.route('/instances', methods=['GET'])
-@jwt_required()
+@api_key_required
 def get_course_instances():
     try:
         search = request.args.get('search', '').strip()
@@ -190,7 +189,7 @@ def get_course_instances():
 
 
 @enrollments_bp.route('/students', methods=['GET'])
-@jwt_required()
+@api_key_required
 def get_students():
     try:
         search = request.args.get('search', '').strip()
@@ -224,7 +223,7 @@ def get_students():
 
 
 @enrollments_bp.route('/', methods=['POST'])
-@jwt_required()
+@api_key_required
 def create_enrollment():
     try:
         data = request.get_json()
@@ -307,7 +306,7 @@ def create_enrollment():
 
 
 @enrollments_bp.route('/bulk-enroll', methods=['POST'])
-@jwt_required()
+@api_key_required
 def bulk_enroll_students():
     try:
         data = request.get_json()
@@ -527,7 +526,7 @@ def bulk_enroll_students():
 #         return jsonify({'error': str(e)}), 500
 
 @enrollments_bp.route('/upload-csv', methods=['POST'])
-@jwt_required()
+@api_key_required
 def upload_csv():
     try:
         if 'file' not in request.files:
@@ -639,7 +638,7 @@ def upload_csv():
 
 
 @enrollments_bp.route('/export-csv', methods=['GET'])
-@jwt_required()
+@api_key_required
 def export_csv():
     try:
         instance_id = request.args.get('instance_id')

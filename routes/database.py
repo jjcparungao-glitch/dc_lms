@@ -1,14 +1,14 @@
 from flask import Blueprint, request, jsonify
-from flask_jwt_extended import jwt_required
+
 from init_db import get_db
-from utils import logger
+from utils import api_key_required, logger
 
 
 database_bp = Blueprint('database', __name__)
 
 
 @database_bp.route('/tables', methods=['GET'])
-@jwt_required()
+@api_key_required
 def list_tables():
     try:
         db = get_db()
@@ -22,7 +22,7 @@ def list_tables():
 
 
 @database_bp.route('/table-data', methods=['GET'])
-@jwt_required()
+@api_key_required
 def get_table_data():
     table_name = request.args.get('table')
     page = int(request.args.get('page', 1))
@@ -57,7 +57,7 @@ def get_table_data():
 
 
 @database_bp.route('/execute-query', methods=['POST'])
-@jwt_required()
+@api_key_required
 def execute_custom_query():
     try:
         data = request.get_json()
@@ -73,7 +73,8 @@ def execute_custom_query():
             return jsonify({
                 'success': False,
                 'requires_confirmation': True,
-                'message': 'This query will modify the database. Please confirm to proceed.'
+                'message': 'This query will modify the database. Please confirm to proceed.',
+                'error': 'This query will modify the database. Please confirm to proceed.'
             }), 200
 
         db = get_db()

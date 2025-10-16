@@ -1,3 +1,27 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+@layer utilities {
+  /* Collapsed sidebar width */
+  .sidebar-collapsed {
+    @apply w-16;
+  }
+
+  /* Hide label smoothly */
+  .sidebar-collapsed .sidebar-label {
+    @apply opacity-0 scale-0 hidden;
+  }
+
+  /* Keep icons centered */
+  .sidebar-collapsed .sidebar-btn {
+    @apply justify-center px-0;
+  }
+
+  /* Main content shift when sidebar collapsed */
+  .main-collapsed {
+    @apply ml-16; /* match collapsed sidebar width */
+  }
+
+
+}

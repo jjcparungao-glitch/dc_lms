@@ -1,5 +1,5 @@
 from flask import Blueprint, render_template, redirect, url_for
-from flask_jwt_extended import get_jwt_identity, get_jwt, verify_jwt_in_request
+from flask_jwt_extended import get_jwt_identity, get_jwt, unset_jwt_cookies, verify_jwt_in_request
 
 from init_db import get_db
 
@@ -9,20 +9,45 @@ def current_user():
     try:
         # Will verify if a token is present; will not require one
         verify_jwt_in_request(optional=True)
-        return str(get_jwt_identity()), get_jwt()
+        return get_jwt_identity(), get_jwt()
     except Exception:
         # Expired/invalid/missing token -> treat as anonymous
         return None, {}
 
+
+@views.route('/docs')
+def docs():
+    return render_template('index.html')
+
+
 @views.route('/')
+def home():
+    return redirect(url_for('views.docs'))
+
+
 @views.route('/login')
-def index():
+def login():
     ident, claims = current_user()
     role = claims.get('role')
     if ident and role:
         if role == 'admin':
-            return redirect(url_for('views.admin_dashboard'))
-        elif role == 'user':
-            return redirect(url_for('views.user_dashboard'))
-    return render_template('index.html')
+            return redirect(url_for('views.dashboard'))
+        else:
+            return render_template('login.html')
+    return render_template('login.html')
 
+
+@views.route('/dashboard')
+def dashboard():
+    ident, claims = current_user()
+    role = claims.get('role')
+
+    if ident and role:
+        if role == 'admin':
+            return render_template('dashboard.html', user=claims)
+        else:
+            resp = redirect(url_for('views.login'))
+            return unset_jwt_cookies(resp)
+
+    # not authenticated -> redirect to login page
+    return redirect(url_for('views.login'))

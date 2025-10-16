@@ -1,7 +1,7 @@
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required
 from init_db import get_db
-from utils import logger
+from utils import logger,api_key_required
 from bs4 import BeautifulSoup
 import random
 import traceback
@@ -9,7 +9,7 @@ import traceback
 assessment_preview_bp = Blueprint('assessment_preview', __name__)
 
 @assessment_preview_bp.route ('/courses')
-@jwt_required()
+@api_key_required
 def get_preview_courses():
     search = request.args.get('search', '').strip()
     try:
@@ -32,10 +32,10 @@ def get_preview_courses():
             return jsonify({'success': True, 'courses': courses}), 200
     except Exception as e:
         logger.error(f"Error fetching courses for assessment preview: {str(e)}")
-        return jsonify({'success': False, 'message': str(e)}), 500    
-    
+        return jsonify({'success': False, 'message': str(e)}), 500
+
 @assessment_preview_bp.route('/assessments/<int:course_id>', methods=['GET'])
-@jwt_required()
+@api_key_required
 def get_preview_assessments(course_id):
     try:
         db = get_db()
@@ -48,7 +48,7 @@ def get_preview_assessments(course_id):
                             WHERE ascope.course_id = %s
                             GROUP BY et.exam_type_id, et.exam_name, et.total_items
                             ORDER BY et.exam_name
-                            """, (course_id,))  
+                            """, (course_id,))
             assessments = cursor.fetchall()
             result = []
             for assessment in assessments:
@@ -65,13 +65,13 @@ def get_preview_assessments(course_id):
         return jsonify({'success': False, 'message': str(e)}), 500
 
 @assessment_preview_bp.route ('generate-preview', methods=['POST'])
-@jwt_required()
+@api_key_required
 def generate_assessment_preview():
     try:
         data = request.get_json()
         course_id = data.get('course_id')
         exam_type_id = data.get('exam_type_id')
-        
+
         if not course_id or not exam_type_id:
             return jsonify({'success': False, 'message': 'course_id and exam_type_id are required'}), 400
         db = get_db()
@@ -83,9 +83,9 @@ def generate_assessment_preview():
                            ''', (exam_type_id,))
             assessment_info = cursor.fetchone()
             if not assessment_info:
-                return jsonify({'success': False, 'message': 'Invalid exam_type_id'}), 400  
+                return jsonify({'success': False, 'message': 'Invalid exam_type_id'}), 400
             total_items_needed = assessment_info['total_items']
-            
+
             cursor.execute ('''
                             SELECT
                             m.module_id,
@@ -108,18 +108,18 @@ def generate_assessment_preview():
                             WHERE ascope.course_id = %s AND ascope.exam_type_id = %s
                             ORDER BY m.position, ms.position
                             ''', (course_id, exam_type_id))
-            all_questions = cursor.fetchall()   
+            all_questions = cursor.fetchall()
             if not all_questions:
                 return jsonify({'success': False, 'message': 'No questions found for the selected course and assessment type'}), 404
             questions_by_module = {}
             for q in all_questions:
                 module_id = q['module_id']
                 section_id = q['section_id']
-                
+
                 if module_id not in questions_by_module:
                     content_text = BeautifulSoup(q['content_html'], 'html.parser').get_text() if q['content_html'] else ''
                     module_title = content_text.split('\n')[0].strip() if content_text else f"Module {q['module_position']}"
-                    
+
                     questions_by_module[module_id] = {
                         'module_position': q['module_position'],
                         'module_title': module_title,
@@ -131,7 +131,7 @@ def generate_assessment_preview():
                         'section_title': q['section_title'],
                         'questions': []
                     }
-                    
+
                 questions_by_module[module_id]['sections'][section_id]['questions'].append({
                     'item_id': q['item_id'],
                     'question': q['question'],
@@ -143,7 +143,7 @@ def generate_assessment_preview():
                 })
             selected_questions = []
             all_available_questions = []
-            
+
             for module_id, module_data in questions_by_module.items():
                 for section_id, section_data in module_data ['sections'].items():
                     for question in section_data['questions']:
@@ -154,26 +154,26 @@ def generate_assessment_preview():
                             'section_id': section_id,
                             'section_title': section_data['section_title'],
                             'section_position': section_data['section_position'],
-                            **question                            
+                            **question
                         })
             if len(all_available_questions) < total_items_needed:
-                return jsonify({'success': False, 
+                return jsonify({'success': False,
                                 'error': 'Not enough questions available',
                                 'message': f'Not enough questions available ({len(all_available_questions)}) to generate the requested number of items ({total_items_needed})'}), 400
             selected_questions = random.sample(all_available_questions, total_items_needed)
-            
+
             selected_questions.sort(key=lambda x: (x['module_position'], x['section_position']))
-            
+
             module_stats = {}
             section_stats = {}
-            
+
             for q in selected_questions:
                 module_key = f"{q['module_position']}: {q['module_title']}"
                 section_key = f"{q['section_title']}"
-                
+
                 module_stats[module_key] = module_stats.get(module_key, 0) + 1
                 section_stats[section_key] = section_stats.get(section_key, 0) + 1
-                
+
             return jsonify({
                 'success': True,
                 'assessment_info':{

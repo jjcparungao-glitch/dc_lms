@@ -23,8 +23,8 @@ def create_app():
     app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(minutes=int(os.getenv('JWT_EXP_MINUTES', 15)))
     app.config['JWT_REFRESH_TOKEN_EXPIRES'] = timedelta(days=int(os.getenv('REFRESH_EXP_DAYS', 7)))
     app.config['JWT_TOKEN_LOCATION'] = ['cookies']
-    app.config['JWT_COOKIE_SECURE'] = False
-    app.config['JWT_COOKIE_SAMESITE'] = 'None'
+    app.config['JWT_COOKIE_SECURE'] = True
+    app.config['JWT_COOKIE_SAMESITE'] = 'None'  # Adjust as needed: 'Lax', 'Strict', or 'None'
     app.config['JWT_COOKIE_CSRF_PROTECT'] = True
     app.config["JWT_ACCESS_COOKIE_NAME"] = "access_token_cookie"
     app.config["JWT_REFRESH_COOKIE_NAME"] = "refresh_token_cookie"
@@ -44,8 +44,8 @@ def create_app():
     from routes.dashboard import dashboard_bp
     from routes.enrollments import enrollments_bp
     from routes.database import database_bp
-
-
+    from routes.users import users_bp
+    from routes.api_key import api_key_bp
 
     #BLUEPRINTS
     app.register_blueprint(views, url_prefix='/')
@@ -59,7 +59,8 @@ def create_app():
     app.register_blueprint(dashboard_bp, url_prefix='/api/dashboard')
     app.register_blueprint(enrollments_bp, url_prefix='/api/enrollments')
     app.register_blueprint(database_bp, url_prefix='/api/database')
-
+    app.register_blueprint(users_bp, url_prefix='/api/users')
+    app.register_blueprint(api_key_bp, url_prefix='/api/api_key')
 
     # Initialize JWT Manager
     jwt = JWTManager(app)
@@ -73,10 +74,6 @@ def create_app():
             return cur.fetchone() is not None
         except:
             return True  # fail-safe: block token if DB fails
-
-# --- Register Blueprints ---
-    from routes.auth import auth
-    app.register_blueprint(auth, url_prefix='/api/auth')
 
     # --- Error Handlers ---
     @app.errorhandler(404)

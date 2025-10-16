@@ -1,12 +1,11 @@
 from flask import Blueprint, jsonify
-from flask_jwt_extended import jwt_required
 from init_db import get_db
-from utils import logger
+from utils import logger,api_key_required
 dashboard_bp = Blueprint('dashboard', __name__)
 
 
 @dashboard_bp.route('/stats', methods=['GET'])
-@jwt_required()
+@api_key_required
 def get_dashboard_stats():
     try:
         db = get_db()
