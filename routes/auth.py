@@ -52,6 +52,36 @@ def login():
         logger.error(f"Error during login: {str(e)}")
         return jsonify({'success': False, 'message': 'An error occurred during login', 'error': str(e)}), 500
 
+@auth_bp.route('/api-key', methods=['POST'])
+def generate_api_key():
+    try:
+        data = request.get_json()
+        external_id = data.get('external_id')
+        password = data.get('password')
+
+        if not external_id or not password:
+            return jsonify({'success': False, 'message': 'External ID and password are required'}), 400
+
+        db = get_db()
+        with db.cursor() as cur:
+            cur.execute("SELECT user_id, password_hash, full_name, role FROM users WHERE external_id = %s", (external_id,))
+            user = cur.fetchone()
+
+            if user and bcrypt.checkpw(password.encode('utf-8'), user['password_hash'].encode('utf-8')):
+                # Create new token
+                access_token = create_access_token(
+                    identity=str(user['user_id']),
+                    additional_claims={
+                        'role': user['role'],
+                        'external_id': external_id,
+                        'full_name': user['full_name']}
+                )
+                return jsonify({'success': True, 'api_key': access_token}), 200
+            else:
+                return jsonify({'success': False, 'message': 'Invalid credentials', 'error': 'Invalid credentials'}), 401
+    except Exception as e:
+        logger.error(f"Error during API key generation: {str(e)}")
+        return jsonify({'success': False, 'message': 'An error occurred during API key generation', 'error': str(e)}), 500
 
 @auth_bp.route('/refresh', methods=['POST'])
 @jwt_required(refresh=True)

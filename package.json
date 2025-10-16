@@ -4,8 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "dev": "npx postcss ./todo_list/static/css/tailwind.css -o ./todo_list/static/css/main.css --watch",
-    "build": "npx postcss ./todo_list/static/css/tailwind.css -o ./todo_list/static/css/main.css --env production"
+    "dev": "npx postcss ./flasky/static/css/tailwind.css -o ./flasky/static/css/main.css --watch",
+    "build": "npx postcss ./flasky/static/css/tailwind.css -o ./flasky/static/css/main.css --env production"
   },
   "keywords": [],
   "author": "",

@@ -1,5 +1,6 @@
 from datetime import timedelta
 from flask import Flask, jsonify, render_template
+from flask_cors import CORS
 from flask_jwt_extended import JWTManager
 from dotenv import load_dotenv
 import os
@@ -12,7 +13,10 @@ def create_app():
     init_app(app)
     # Load environment variables
     load_dotenv()
-
+    CORS(app,
+        supports_credentials=True,
+        resources={r"/api/*": {"origins": os.getenv("CORS_ORIGIN")}},
+    )
     # JWT Configuration
     app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'devsecret')
     app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET', 'devsecret')
@@ -20,7 +24,7 @@ def create_app():
     app.config['JWT_REFRESH_TOKEN_EXPIRES'] = timedelta(days=int(os.getenv('REFRESH_EXP_DAYS', 7)))
     app.config['JWT_TOKEN_LOCATION'] = ['cookies']
     app.config['JWT_COOKIE_SECURE'] = False
-    app.config['JWT_COOKIE_SAMESITE'] = 'Lax'
+    app.config['JWT_COOKIE_SAMESITE'] = 'None'
     app.config['JWT_COOKIE_CSRF_PROTECT'] = True
     app.config["JWT_ACCESS_COOKIE_NAME"] = "access_token_cookie"
     app.config["JWT_REFRESH_COOKIE_NAME"] = "refresh_token_cookie"
@@ -93,8 +97,6 @@ def create_app():
         def handle_exception(e):
             app.logger.error(f"Unhandled exception: {str(e)}")
             return jsonify({"success": False, "message": "Internal server error"}), 500
-
-
 
     return app
 
