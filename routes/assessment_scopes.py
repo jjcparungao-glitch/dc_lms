@@ -149,5 +149,4 @@ def save_assessment_scope():
             db.commit()
             return jsonify({'success': True, 'message': 'Assessment scope saved successfully'}), 200
     except Exception as e:
-        db.rollback()  # Added rollback on error
         return jsonify({'success': False, 'message': str(e)}), 500

@@ -8,7 +8,7 @@ const api = axios.create({
 });
 
 // Read a cookie value by name
-function getCookie(name) {
+export function getCookie(name) {
   const match = document.cookie.match(
     new RegExp("(^|;\\s*)" + name + "=([^;]*)")
   );
@@ -20,15 +20,15 @@ api.interceptors.request.use((config) => {
   const method = (config.method || "get").toLowerCase();
   if (method !== "get") {
     const isRefresh = (config.url || "").includes("/auth/refresh");
-    const csrf = getCookie(
-      isRefresh ? "csrf_refresh_token" : "csrf_access_token"
-    );
+    const csrf = getCookie(isRefresh ? "csrf_refresh_token" : "csrf_access_token");
     if (csrf) config.headers["X-CSRF-TOKEN"] = csrf;
   }
   return config;
 });
 
+
 let isRefreshing = false;
+let refreshIntervalActive = false;
 
 api.interceptors.response.use(
   (res) => res,
@@ -83,10 +83,32 @@ api.interceptors.response.use(
     return Promise.reject(error);
   }
 );
-// Wrappers
-export async function Get(path) {
+
+// Refresh CSRF token periodically (every 5 minutes), prevent overlap
+setInterval(async () => {
+  if (refreshIntervalActive) return;
+  refreshIntervalActive = true;
   try {
-    const res = await api.get(path);
+    const csrf = getCookie("csrf_refresh_token");
+    const res = await Post("/auth/refresh", {}, { "X-CSRF-TOKEN": csrf });
+    if (res.success) {
+      console.log("CSRF token refreshed successfully");
+    } else {
+      console.error("Failed to refresh CSRF token:", res.message);
+    }
+  } catch (error) {
+    console.error("Error refreshing CSRF token:", error);
+  } finally {
+    refreshIntervalActive = false;
+  }
+}, 5 * 60 * 1000);
+
+// Wrappers
+
+// HTTP verb wrappers with custom headers support
+export async function Get(path, headers = {}) {
+  try {
+    const res = await api.get(path, { headers });
     return res.data;
   } catch (err) {
     if (err.response && err.response.data) return err.response.data;
@@ -104,9 +126,9 @@ export async function Post(path, payload = {}, headers = {}) {
   }
 }
 
-export async function Put(path, payload = {}) {
+export async function Put(path, payload = {}, headers = {}) {
   try {
-    const res = await api.put(path, payload);
+    const res = await api.put(path, payload, { headers });
     return res.data;
   } catch (err) {
     if (err.response && err.response.data) return err.response.data;
@@ -114,9 +136,9 @@ export async function Put(path, payload = {}) {
   }
 }
 
-export async function Delete(path, payload = {}) {
+export async function Delete(path, payload = {}, headers = {}) {
   try {
-    const res = await api.delete(path, { data: payload });
+    const res = await api.delete(path, { data: payload, headers });
     return res.data;
   } catch (err) {
     if (err.response && err.response.data) return err.response.data;
@@ -124,12 +146,15 @@ export async function Delete(path, payload = {}) {
   }
 }
 
-export async function Patch(path, payload = {}) {
+export async function Patch(path, payload = {}, headers = {}) {
   try {
-    const res = await api.patch(path, payload);
+    const res = await api.patch(path, payload, { headers });
     return res.data;
   } catch (err) {
     if (err.response && err.response.data) return err.response.data;
     throw err;
   }
 }
+
+// Export the axios instance for advanced use
+export default api;
