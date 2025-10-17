@@ -1,5 +1,6 @@
 from datetime import timedelta
 from flask import Flask, jsonify, render_template
+from flask_restx import Api
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager
 from dotenv import load_dotenv
@@ -8,9 +9,85 @@ import os
 from init_db import get_db, init_app
 
 
+authorizations ={
+    'XApiKeyAuth': {
+        'type': 'apiKey',
+        'in': 'header',
+        'name': 'X-API-KEY'
+    },
+    'accessTokenAuth': {
+        'type':'apiKey',
+        'in':'header',
+        'name': 'X-CSRF-TOKEN'
+    }
+}
+
 def create_app():
     app = Flask(__name__)
+
+    app.config["RESTX_MASK_SWAGGER"] = False
     init_app(app)
+    api = Api(app,
+              doc='/docs' ,
+              authorizations=authorizations,
+              security=['XApiKeyAuth', 'accessTokenAuth'],
+              title="LMS API Documentation",
+              version="1.0.0",
+              description="""
+The **LMS API** provides endpoints for managing **courses**, **users**, **enrollments**, and **assessments** in the AMA Learning Management System (LMS).
+
+---
+
+## 🔐 Authentication
+
+### 2️⃣ API Key Authentication
+
+The API key is for **server-side requests only** — do **not** expose it on the client side.
+
+Each key is tied to an LMS user account.
+
+- [Sign in](http://10.10.2.197:8080/login) with an LMS admin account.
+- [Generate an API Key](http://10.10.2.197:8080/dashboard/) after logging in.
+- Save it securely (it’s only shown once).
+- You can delete or regenerate keys anytime from your account.
+
+#### ✅ Use via Header
+Include the API key in the `X-API-KEY` header of your requests:
+```
+    X-API-KEY: sk_your_generated_api_key_here
+```
+
+#### 2️⃣ Cookie-Based JWT Authentication
+For the API key generation and other endpoints, they uses cookie-based JWT authentication instead of X-API-KEY header.
+
+- Log in via the `/api/auth/login` endpoint to receive JWT tokens set as secure cookies.
+- Include the access token cookie in subsequent requests to authenticate.
+- X-CSRF-TOKEN = access_token_cookie headers are use for jwt_required endpoints to protect against CSRF attacks.
+
+### Structure
+
+#### Every response is contained in a JSON object with the following structure:
+```json
+{
+    "success": true,
+    "message": "Descriptive message",
+    "data_name": { ... } // Varies by endpoint
+},200
+```
+
+#### error responses:
+```json
+{
+    "success": false,
+    "message": "Error description",
+    "error": str(e)
+},500
+```
+
+              """
+              )
+
+
     # Load environment variables
     load_dotenv()
     CORS(app,
@@ -35,32 +112,32 @@ def create_app():
     #ROUTES IMPORTS
     from routes.auth import auth_bp
     from routes.views import views
-    from routes.courses import courses_bp
-    from routes.assessment_scopes import assessment_scopes_bp
-    from routes.course_instructors import course_instructors_bp
-    from routes.exam_types import exam_types_bp
-    from routes.modules import modules_bp
-    from routes.assessment_preview import assessment_preview_bp
-    from routes.dashboard import dashboard_bp
-    from routes.enrollments import enrollments_bp
-    from routes.database import database_bp
-    from routes.users import users_bp
-    from routes.api_key import api_key_bp
+    from routes.courses import courses_ns
+    from routes.assessment_scopes import assessment_scopes_ns
+    from routes.course_instructors import course_instructors_ns
+    from routes.exam_types import exam_types_ns
+    from routes.modules import modules_ns
+    from routes.assessment_preview import assessment_preview_ns
+    from routes.dashboard import dashboard_ns
+    from routes.enrollments import enrollments_ns
+    from routes.database import database_ns
+    from routes.users import users_ns
+    from routes.api_key import api_key_ns
 
-    #BLUEPRINTS
-    app.register_blueprint(views, url_prefix='/')
+    #BLUEPRINTS & NAMESPACES
+    app.register_blueprint(views)
     app.register_blueprint(auth_bp, url_prefix='/api/auth')
-    app.register_blueprint(courses_bp, url_prefix='/api/courses')
-    app.register_blueprint(assessment_scopes_bp, url_prefix='/api/assessment_scopes')
-    app.register_blueprint(course_instructors_bp, url_prefix='/api/course_instructors')
-    app.register_blueprint(exam_types_bp, url_prefix='/api/exam_types')
-    app.register_blueprint(modules_bp, url_prefix='/api/modules')
-    app.register_blueprint(assessment_preview_bp, url_prefix='/api/assessment_preview')
-    app.register_blueprint(dashboard_bp, url_prefix='/api/dashboard')
-    app.register_blueprint(enrollments_bp, url_prefix='/api/enrollments')
-    app.register_blueprint(database_bp, url_prefix='/api/database')
-    app.register_blueprint(users_bp, url_prefix='/api/users')
-    app.register_blueprint(api_key_bp, url_prefix='/api/api_key')
+    api.add_namespace(courses_ns, path='/api/courses')
+    api.add_namespace(assessment_scopes_ns, path='/api/assessment_scopes')
+    api.add_namespace(course_instructors_ns, path='/api/course_instructors')
+    api.add_namespace(exam_types_ns, path='/api/exam_types')
+    api.add_namespace(modules_ns, path='/api/modules')
+    api.add_namespace(assessment_preview_ns, path='/api/assessment_preview')
+    api.add_namespace(dashboard_ns, path='/api/dashboard')
+    api.add_namespace(enrollments_ns, path='/api/enrollments')
+    api.add_namespace(database_ns, path='/api/database')
+    api.add_namespace(users_ns, path='/api/users')
+    api.add_namespace(api_key_ns, path='/api/api_key')
 
     # Initialize JWT Manager
     jwt = JWTManager(app)

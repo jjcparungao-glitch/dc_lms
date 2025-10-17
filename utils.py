@@ -114,12 +114,11 @@ def api_key_required(f):
     def decorated_function(*args, **kwargs):
         api_key = request.headers.get('X-API-KEY')
         if not api_key:
-            return jsonify({'success': False, 'message': 'API key is missing'}), 401
+            return {'success': False, 'message': 'API key is missing'}, 401
 
         from init_db import get_db
         db = get_db()
         with db.cursor() as cursor:
-            # Fetch all api keys (or a subset) and verify with bcrypt.checkpw
             cursor.execute('''
                 SELECT ak.api_key AS hashed_api_key, ak.user_id, u.role, u.external_id, u.full_name
                 FROM api_keys ak
@@ -138,7 +137,7 @@ def api_key_required(f):
                     continue
 
             if not matched:
-                return jsonify({'success': False, 'message': 'Invalid API key'}), 403
+                return {'success': False, 'message': 'Invalid API key'}, 403
 
             g.user_id = matched['user_id']
             g.role = matched['role']

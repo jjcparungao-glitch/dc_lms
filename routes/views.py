@@ -15,14 +15,11 @@ def current_user():
         return None, {}
 
 
-@views.route('/docs')
-def docs():
-    return render_template('index.html')
 
 
 @views.route('/')
-def home():
-    return redirect(url_for('views.docs'))
+def root():
+    return redirect('/docs')
 
 
 @views.route('/login')

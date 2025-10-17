@@ -13,7 +13,7 @@ document.getElementById("loginForm").addEventListener("submit", async (e) => {
 
   try {
     const response = await Post("/auth/login", { external_id, password });
-
+    console.log("Login response:", response);
     if (response.success) {
       showToast("Login successful!", "success");
       await new Promise((resolve) => setTimeout(resolve, 1500));
